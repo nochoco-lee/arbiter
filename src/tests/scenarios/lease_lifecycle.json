@@ -1,0 +1,48 @@
+{
+  "name": "Lease Lifecycle",
+  "runner": "contract",
+  "description": "Evaluates strict lease state machine transitions from GRANTED to AVAILABLE to FREE.",
+  "steps": [
+    {
+      "action": "request",
+      "agentId": "A",
+      "duration": 300,
+      "expectStatus": 200,
+      "comment": "1. Holder acquires lease"
+    },
+    {
+      "action": "assert_broker_state",
+      "expectedState": "GRANTED"
+    },
+    {
+      "action": "release",
+      "agentId": "A",
+      "comment": "2. Explicitly releasing uncontended lease puts it to AVAILABLE (warm standby)."
+    },
+    {
+      "action": "assert_broker_state",
+      "expectedState": "AVAILABLE"
+    },
+    {
+      "action": "request",
+      "agentId": "B",
+      "duration": 300,
+      "expectStatus": 200,
+      "comment": "3. New agent preempts AVAILABLE lease seamlessly."
+    },
+    {
+      "action": "assert_broker_state",
+      "expectedState": "GRANTED"
+    },
+    {
+      "action": "yield",
+      "agentId": "B",
+      "expectStatus": 200,
+      "comment": "4. Directly Yielding bypasses AVAILABLE and drops to FREE."
+    },
+    {
+      "action": "assert_broker_state",
+      "expectedState": "FREE"
+    }
+  ]
+}

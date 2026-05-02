@@ -1,0 +1,35 @@
+{
+  "name": "Integration Smoke",
+  "runner": "integration",
+  "description": "Tests full lifecycle using native native node CLI calls and shim interceptions, rather than HTTP broker APIs.",
+  "steps": [
+    {
+      "action": "cli_request",
+      "agentId": "CLI",
+      "expectStatus": 200,
+      "comment": "1. Request via Arbiter CLI"
+    },
+    {
+      "action": "run_shim",
+      "agentId": "CLI",
+      "command": [
+        "adb",
+        "shell",
+        "getprop",
+        "ro.product.model"
+      ],
+      "expectedStdout": "[tdb]",
+      "comment": "2. ADB command via Shim correctly triggers the tdb mock adapter and captures execution."
+    },
+    {
+      "action": "cli_release",
+      "agentId": "CLI",
+      "comment": "3. Release via Arbiter CLI"
+    },
+    {
+      "action": "assert_broker_state",
+      "expectedState": "AVAILABLE",
+      "comment": "4. Verify state naturally rolled into AVAILABLE"
+    }
+  ]
+}

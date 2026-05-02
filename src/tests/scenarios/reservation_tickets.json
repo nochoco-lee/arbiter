@@ -1,0 +1,54 @@
+{
+  "name": "Reservation Tickets",
+  "runner": "contract",
+  "description": "Tests asynchronous execution tickets. Evaluates that async requests return 202 tickets, that yielding promotes tickets to READY, and claiming them converts them to GRANTED leases.",
+  "config": {
+    "ARBITER_TICKET_THRESHOLD_WAIT": "5"
+  },
+  "steps": [
+    {
+      "action": "request",
+      "agentId": "A",
+      "duration": 60,
+      "expectStatus": 200,
+      "comment": "1. Holder acquires lease."
+    },
+    {
+      "action": "request",
+      "agentId": "B",
+      "async": true,
+      "expectStatus": 202,
+      "comment": "2. Agent B requests async reservation explicitly, receiving a ticket."
+    },
+    {
+      "action": "yield",
+      "agentId": "A",
+      "expectStatus": 200,
+      "comment": "3. Agent A yields, giving the resource to B's ticket."
+    },
+    {
+      "action": "poll_queue",
+      "agentId": "B",
+      "waitForState": "READY",
+      "comment": "4. Poll queue until B's ticket shifts to READY."
+    },
+    {
+      "action": "claim",
+      "agentId": "B",
+      "expectStatus": 200,
+      "comment": "5. Agent B claims its READY ticket."
+    },
+    {
+      "action": "assert_broker_state",
+      "expectedState": "GRANTED",
+      "comment": "6. Ticket organically converted to a GRANTED lease."
+    },
+    {
+      "action": "request",
+      "agentId": "C",
+      "wait": true,
+      "expectStatus": 202,
+      "comment": "7. Agent C tries a standard request which blocks, but passes the 5s threshold, organically returning a 202 ASYNC ticket."
+    }
+  ]
+}

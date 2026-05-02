@@ -1,0 +1,26 @@
+{
+  "name": "Relay Mode Contract",
+  "runner": "contract",
+  "description": "Evaluates that network TCP relay modes correctly proxy stdin/stdout across the broker and child shim adapter natively.",
+  "steps": [
+    {
+      "action": "cli_request",
+      "agentId": "A",
+      "expectStatus": 200,
+      "comment": "1. Agent A acquires lease."
+    },
+    {
+      "action": "run_shim",
+      "agentId": "A",
+      "command": [
+        "adb",
+        "shell",
+        "echo",
+        "hello"
+      ],
+      "shimUseRelay": true,
+      "expectedStdout": "hello",
+      "comment": "2. Agent A runs an ADB shell echo command using explicitly the Relay Mode network configuration."
+    }
+  ]
+}

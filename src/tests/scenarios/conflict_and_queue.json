@@ -1,0 +1,76 @@
+{
+  "name": "Conflict and Queue",
+  "runner": "contract",
+  "description": "Tests that conflicting FIFO queues process natively.",
+  "steps": [
+    {
+      "action": "request",
+      "agentId": "A",
+      "duration": 60,
+      "expectStatus": 200,
+      "comment": "1. Holder acquires lease"
+    },
+
+    {
+      "action": "request",
+      "agentId": "C",
+      "duration": 300,
+      "wait": true,
+      "expectStatus": 200,
+      "background": true,
+      "comment": "3. C enters queue patiently"
+    },
+    {
+      "action": "request",
+      "agentId": "D",
+      "duration": 300,
+      "wait": true,
+      "expectStatus": 200,
+      "background": true,
+      "comment": "4. D enters queue behind C patiently"
+    },
+    {
+      "action": "delay",
+      "ms": 500,
+      "comment": "Allow async broker to settle"
+    },
+    {
+      "action": "assert_queue_depth",
+      "queueDepth": 2,
+      "comment": "Ensure C and D are correctly queued"
+    },
+    {
+      "action": "yield",
+      "agentId": "A",
+      "expectStatus": 200,
+      "comment": "5. Agent A yields, giving the lease to C"
+    },
+    {
+      "action": "wait_broker_state",
+      "expectedState": "GRANTED",
+      "comment": "Wait for Agent C promotion"
+    },
+    {
+      "action": "yield",
+      "agentId": "C",
+      "expectStatus": 200,
+      "comment": "6. Agent C yields, giving the lease to D"
+    },
+    {
+      "action": "wait_broker_state",
+      "expectedState": "GRANTED",
+      "comment": "Wait for Agent D promotion"
+    },
+    {
+      "action": "yield",
+      "agentId": "D",
+      "expectStatus": 200,
+      "comment": "7. Agent D yields."
+    },
+    {
+      "action": "assert_broker_state",
+      "expectedState": "FREE",
+      "comment": "All pending requests fulfilled, state returns natively to FREE"
+    }
+  ]
+}

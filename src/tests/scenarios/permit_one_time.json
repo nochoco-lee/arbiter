@@ -1,0 +1,41 @@
+{
+  "name": "Permit One-Time Policy",
+  "runner": "contract",
+  "description": "Validates that a permit token executes exactly once and drops all subsequent command attempts to prevent token hijacking.",
+  "steps": [
+    {
+      "action": "request",
+      "agentId": "A",
+      "duration": 300,
+      "expectStatus": 200,
+      "comment": "1. Agent A acquires lease."
+    },
+    {
+      "action": "permit_request",
+      "agentId": "P",
+      "expectStatus": 200,
+      "comment": "2. Agent P gets auto-granted permit."
+    },
+    {
+      "action": "broker_request",
+      "endpoint": "/api/permit/execution/start",
+      "agentId": "P",
+      "expectStatus": 200,
+      "comment": "3. First execution succeeds."
+    },
+    {
+      "action": "broker_request",
+      "endpoint": "/api/permit/execution/finish",
+      "agentId": "P",
+      "expectStatus": 200,
+      "comment": "Finish first execution."
+    },
+    {
+      "action": "broker_request",
+      "endpoint": "/api/permit/execution/start",
+      "agentId": "P",
+      "expectStatus": 404,
+      "comment": "4. Second execution using the same permit token is rejected."
+    }
+  ]
+}

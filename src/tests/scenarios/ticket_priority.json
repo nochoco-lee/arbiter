@@ -1,0 +1,65 @@
+{
+  "name": "Ticket Priority Contract",
+  "runner": "contract",
+  "description": "Tests that an asynchronous ticket holder that is READY for claim natively beats out a normal overlapping raw request.",
+  "config": {
+    "ARBITER_TICKET_THRESHOLD_WAIT": "3"
+  },
+  "steps": [
+    {
+      "action": "request",
+      "agentId": "A",
+      "duration": 60,
+      "expectStatus": 200
+    },
+    {
+      "action": "request",
+      "agentId": "B",
+      "async": true,
+      "expectStatus": 202
+    },
+    {
+      "action": "yield",
+      "agentId": "A",
+      "expectStatus": 200
+    },
+    {
+      "action": "poll_queue",
+      "agentId": "B",
+      "waitForState": "READY",
+      "timeoutMs": 10000
+    },
+    {
+      "action": "request",
+      "agentId": "C",
+      "wait": true,
+      "expectStatus": 200,
+      "background": true,
+      "comment": "Agent C asks for a lease AFTER B's ticket is already marked READY, simulating a race"
+    },
+    {
+      "action": "delay",
+      "ms": 1000
+    },
+    {
+      "action": "claim",
+      "agentId": "B",
+      "expectStatus": 200,
+      "comment": "Agent B claims their ticket, succeeding because tickets retain queue priority"
+    },
+    {
+      "action": "assert_broker_state",
+      "expectedState": "GRANTED"
+    },
+    {
+      "action": "yield",
+      "agentId": "B",
+      "expectStatus": 200
+    },
+    {
+      "action": "assert_broker_state",
+      "expectedState": "GRANTED",
+      "comment": "Now that B is done, C finally inherits the lease"
+    }
+  ]
+}

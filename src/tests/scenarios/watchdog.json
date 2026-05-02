@@ -1,0 +1,72 @@
+{
+  "name": "Watchdog Sweeper",
+  "runner": "contract",
+  "description": "Tests watchdog cycles verifying that expiring leases correctly revert to FREE, resurrect if uncontended, or promote waiters instantly if contended.",
+  "config": {
+    "ARBITER_ZOMBIE_LIMIT": "8000"
+  },
+  "steps": [
+    {
+      "action": "request",
+      "agentId": "Z",
+      "resourceSuffix": "zombie",
+      "duration": 300,
+      "expectStatus": 200,
+      "comment": "1. Zombie Reclaim: Acquire lease."
+    },
+    {
+      "action": "wait_broker_state",
+      "resourceSuffix": "zombie",
+      "expectedState": "FREE",
+      "timeoutMs": 20000,
+      "comment": "2. Zombie Reclaim: Wait heavily over limit. Watchdog organically forces FREE."
+    },
+    {
+      "action": "request",
+      "agentId": "R",
+      "resourceSuffix": "resurrect",
+      "duration": 4,
+      "expectStatus": 200,
+      "comment": "3. Resurrection: Acquire micro 4s lease."
+    },
+    {
+      "action": "delay",
+      "ms": 6000,
+      "comment": "Wait 6s, lease theoretically expired, but below 8s zombie limit... uncontended."
+    },
+    {
+      "action": "heartbeat",
+      "agentId": "R",
+      "resourceSuffix": "resurrect",
+      "comment": "4. Resurrection heartbeat triggers auto-resurrection on uncontended expired resource."
+    },
+    {
+      "action": "assert_broker_state",
+      "resourceSuffix": "resurrect",
+      "expectedState": "GRANTED"
+    },
+    {
+      "action": "request",
+      "agentId": "C1",
+      "resourceSuffix": "contend",
+      "duration": 3,
+      "expectStatus": 200,
+      "comment": "5. Contended Reclaim: Holder acquires 3s lease."
+    },
+    {
+      "action": "request",
+      "agentId": "C2",
+      "resourceSuffix": "contend",
+      "wait": true,
+      "expectStatus": 200,
+      "background": true,
+      "comment": "6. Waiter queues up natively."
+    },
+    {
+      "action": "wait_broker_state",
+      "resourceSuffix": "contend",
+      "expectedState": "GRANTED",
+      "comment": "7. Watchdog sees contention as C1 expires, kills C1, promotes C2 to GRANTED."
+    }
+  ]
+}

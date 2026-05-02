@@ -1,0 +1,51 @@
+{
+  "name": "Permit Flow",
+  "runner": "contract",
+  "description": "Evaluates safe auto-grant permits and interactive destructive permit resolutions.",
+  "steps": [
+    {
+      "action": "request",
+      "agentId": "A",
+      "duration": 300,
+      "wait": true,
+      "expectStatus": 200,
+      "comment": "1. Agent A acquires lease."
+    },
+    {
+      "action": "permit_request",
+      "agentId": "AutoReq",
+      "expectStatus": 200,
+      "comment": "2. Auto-grant succeeds because read-only-logs is safe against isolated-package."
+    },
+    {
+      "action": "broker_request",
+      "endpoint": "/api/permit/execution/start",
+      "agentId": "AutoReq",
+      "expectStatus": 200,
+      "comment": "Mark permit as executing."
+    },
+    {
+      "action": "broker_request",
+      "endpoint": "/api/permit/execution/finish",
+      "agentId": "AutoReq",
+      "expectStatus": 200,
+      "comment": "Mark permit as finished."
+    },
+    {
+      "action": "permit_request",
+      "agentId": "PendingReq",
+      "expectStatus": 200,
+      "expectedPermitStatus": "PENDING",
+      "permitCommands": "adb shell reboot",
+      "comment": "3. Permit returns 200 HTTP status with PENDING body requiring manual resolution."
+    },
+    {
+      "action": "permit_resolve",
+      "agentId": "A",
+      "permitForAgent": "PendingReq",
+      "grant": true,
+      "expectStatus": 200,
+      "comment": "4. Agent A (lease holder) grants the pending permit."
+    }
+  ]
+}

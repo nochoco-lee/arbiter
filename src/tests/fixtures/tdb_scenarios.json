@@ -1,0 +1,44 @@
+[
+  {
+    "scenario": "Standard Success - Fast Command",
+    "argsMatch": ["shell", "getprop", "ro.product.model"],
+    "output": "[ro.product.model]: [Arbiter-Mock-Device-V1]",
+    "delayMs": 100,
+    "exitCode": 0
+  },
+  {
+    "scenario": "Heavy Load - Slow Installation",
+    "argsMatch": ["install", "heavy-app.apk"],
+    "output": "Performing Streamed Install\nSuccess",
+    "delayMs": 8000,
+    "exitCode": 0
+  },
+  {
+    "scenario": "Failure State - Missing File",
+    "argsMatch": ["install", "missing.apk"],
+    "output": "adb: failed to stat missing.apk: No such file or directory",
+    "delayMs": 200,
+    "exitCode": 1
+  },
+  {
+    "scenario": "Interactive Test - Shell Wait",
+    "argsMatch": ["shell", "sleep", "10"],
+    "output": "",
+    "delayMs": 10000,
+    "exitCode": 0
+  },
+  {
+    "scenario": "Crash Test - Sudden Exit",
+    "argsMatch": ["shell", "reboot"],
+    "output": "Rebooting...",
+    "delayMs": 500,
+    "exitCode": 0
+  },
+  {
+    "scenario": "Permission Test - Log Reading",
+    "argsMatch": ["logcat", "-d"],
+    "output": "--------- beginning of main\n04-14 10:00:01.123  1000  1000 D Arbiter: Mock log entry\n04-14 10:00:05.456  1000  1000 I ActivityManager: Displayed com.test.app",
+    "delayMs": 500,
+    "exitCode": 0
+  }
+]

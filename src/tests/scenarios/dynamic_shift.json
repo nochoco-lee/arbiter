@@ -1,0 +1,24 @@
+{
+  "name": "Dynamic Async Shift",
+  "runner": "contract",
+  "description": "Tests that a standard blocking request automatically converts to an ASYNC ticket if it waits in queue longer than the configured threshold.",
+  "config": {
+    "ARBITER_TICKET_THRESHOLD_WAIT": "5"
+  },
+  "steps": [
+    {
+      "action": "request",
+      "agentId": "A",
+      "duration": 300,
+      "expectStatus": 200,
+      "comment": "1. Agent A takes the lease."
+    },
+    {
+      "action": "request",
+      "agentId": "B",
+      "wait": true,
+      "expectStatus": 202,
+      "comment": "2. Agent B requests a blocking lease. After 5s (threshold), it yields a 202 ASYNC ticket."
+    }
+  ]
+}

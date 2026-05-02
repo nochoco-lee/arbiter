@@ -1,0 +1,34 @@
+# ARBITER Configuration
+# This file defines the coordination rules for shared resources.
+
+resources:
+  default:
+    # --- LEASE TIMINGS ---
+    # Default time (seconds) an agent holds a resource if not specified.
+    default_lease_seconds: 300      # 5 minutes
+
+    # Maximum time (seconds) an agent is allowed to request via --duration.
+    max_lease_seconds: 600          # 10 minutes
+
+    # Absolute hard limit (seconds). The lease is force-released after this total
+    # time even if the agent is still active, to prevent starvation.
+    global_ceiling_seconds: 1800    # 30 minutes
+
+    # --- RELIABILITY & SAFETY ---
+    # How long the broker waits for a heartbeat before force-releasing (Watchdog).
+    # Since our shim sends heartbeats every 10s, 30s is a safe buffer.
+    heartbeat_timeout_seconds: 30
+
+    # How long a single command (e.g. adb shell) is allowed to run before 
+    # the SHIM kills the child process.
+    command_timeout_seconds: 60
+
+    # --- EXCEPTIONS ---
+    # Commands that are allowed to bypass the command_timeout (infinite duration).
+    # Useful for slow installations or log streaming.
+    command_timeout_exceptions:
+      - "adb install"
+      - "adb logcat"
+      - "gradlew"
+      - "pod install"
+      - "npm install"

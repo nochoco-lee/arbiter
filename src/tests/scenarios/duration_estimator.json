@@ -1,0 +1,58 @@
+{
+  "name": "Duration Estimator Contract",
+  "runner": "json",
+  "steps": [
+    {
+      "action": "request",
+      "agentId": "agentA",
+      "duration": 300,
+      "wait": true
+    },
+    {
+      "action": "broker_request",
+      "endpoint": "/api/stat/duration",
+      "agentId": "agentA",
+      "payload": {
+        "command": "adb install test.apk",
+        "duration_ms": 5000
+      },
+      "expectStatus": 202
+    },
+    {
+      "action": "broker_request",
+      "endpoint": "/api/stat/duration",
+      "agentId": "agentA",
+      "payload": {
+        "command": "adb install test2.apk",
+        "duration_ms": 7000
+      },
+      "expectStatus": 202
+    },
+    {
+      "action": "broker_request",
+      "endpoint": "/api/stat/duration",
+      "agentId": "agentA",
+      "payload": {
+        "command": "adb shell ls",
+        "duration_ms": 1000
+      },
+      "expectStatus": 202
+    },
+    {
+      "action": "broker_request",
+      "endpoint": "/api/lease/estimate",
+      "agentId": "agentA",
+      "payload": {
+        "command": "adb install new.apk"
+      },
+      "expectStatus": 200,
+      "expectedResponsePayload": {
+        "estimated_seconds": 6
+      }
+    },
+    {
+      "action": "release",
+      "agentId": "agentA"
+    }
+  ]
+}

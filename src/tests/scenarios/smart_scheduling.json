@@ -1,0 +1,64 @@
+{
+  "name": "Integration Smart Scheduling",
+  "runner": "integration",
+  "description": "Tests full ecosystem scheduling via real CLI commands: capturing ASYNC tickets, submitting permits interactively via CLI, resolving via CLI, and claiming explicitly.",
+  "steps": [
+    {
+      "action": "cli_request",
+      "agentId": "A",
+      "expectStatus": 200,
+      "comment": "1. Agent A acquires via CLI."
+    },
+    {
+      "action": "cli_request",
+      "agentId": "B",
+      "cliAsync": true,
+      "expectStatus": 202,
+      "comment": "2. Agent B requests async ticket via CLI."
+    },
+    {
+      "action": "permit_request",
+      "agentId": "C",
+      "permitCommands": "adb shell reboot",
+      "expectStatus": 200,
+      "expectedPermitStatus": "PENDING",
+      "comment": "3. Agent C requests interactive permit (Using API wrapper for speed instead of blocked CLI subprocess)."
+    },
+    {
+      "action": "run_shim",
+      "agentId": "A",
+      "command": [
+        "adb",
+        "shell",
+        "getprop"
+      ],
+      "expectedStderr": "require owner action",
+      "comment": "4. Agent A attempts workflow, receives stderr warning from shim that an interactive permit is pending."
+    },
+    {
+      "action": "cli_permit_resolve",
+      "agentId": "A",
+      "permitForAgent": "C",
+      "grant": true,
+      "expectStatus": 200,
+      "comment": "5. Agent A grants the permit interactively via CLI."
+    },
+    {
+      "action": "cli_release",
+      "agentId": "A",
+      "comment": "6. Agent A releases."
+    },
+    {
+      "action": "delay",
+      "ms": 5000,
+      "comment": "Allow watchdog to process promotion of Agent B's ticket."
+    },
+    {
+      "action": "cli_request",
+      "agentId": "B",
+      "cliTicketId": "B",
+      "expectStatus": 200,
+      "comment": "7. Agent B explicitly claims its ticket via CLI."
+    }
+  ]
+}

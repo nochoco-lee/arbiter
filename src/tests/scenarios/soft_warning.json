@@ -1,0 +1,46 @@
+{
+  "name": "Soft Warning Integration",
+  "runner": "integration",
+  "description": "Tests that an active process prints a 'Soft Arbitration WARNING' to standard error if its hard duration timeout is reached and the broker forcibly reassigns the lease to another agent (Arbitration Pre-emption).",
+  "config": {
+    "ARBITER_ZOMBIE_LIMIT": "3000"
+  },
+  "steps": [
+    {
+      "action": "request",
+      "agentId": "A",
+      "duration": 2,
+      "expectStatus": 200,
+      "comment": "1. Agent A requests a deliberately short lease (2 seconds maximum execution)"
+    },
+    {
+      "action": "request",
+      "agentId": "B",
+      "wait": true,
+      "expectStatus": 200,
+      "background": true,
+      "comment": "2. Agent B queues up as a blocker."
+    },
+    {
+      "action": "delay",
+      "ms": 1000,
+      "comment": "Allow broker time to register B in the queue"
+    },
+    {
+      "action": "run_shim",
+      "agentId": "A",
+      "command": [
+        "node",
+        "-e",
+        "setTimeout(()=>{}, 12000)"
+      ],
+      "expectedStderr": "warning",
+      "comment": "3. Agent A's shim command runs for 12 seconds."
+    },
+    {
+      "action": "assert_broker_state",
+      "expectedState": "FREE",
+      "comment": "4. Verify the system survived and Agent B acquired it, then Watchdog organically claimed B back to FREE because B lacked a heartbeat for 12s."
+    }
+  ]
+}

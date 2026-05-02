@@ -1,0 +1,63 @@
+{
+  "name": "Draining State",
+  "runner": "contract",
+  "description": "Tests that an active permit prevents a resource from transitioning to FREE or GRANTED when yielded, correctly entering the DRAINING state until the permit finishes execution.",
+  "steps": [
+    {
+      "action": "request",
+      "agentId": "A",
+      "duration": 300,
+      "expectStatus": 200,
+      "comment": "1. Owner A takes lease."
+    },
+    {
+      "action": "permit_request",
+      "agentId": "P",
+      "expectStatus": 200,
+      "comment": "2. Agent P asks for permit. Since it's read-only, it auto-grants and yields a token."
+    },
+    {
+      "action": "broker_request",
+      "endpoint": "/api/permit/execution/start",
+      "agentId": "P",
+      "expectStatus": 200,
+      "comment": "3. Permit starts execution."
+    },
+    {
+      "action": "request",
+      "agentId": "B",
+      "duration": 300,
+      "wait": true,
+      "background": true,
+      "comment": "4. Agent B queues up."
+    },
+    {
+      "action": "delay",
+      "ms": 500,
+      "comment": "Let Agent B block in queue"
+    },
+    {
+      "action": "yield",
+      "agentId": "A",
+      "expectStatus": 200,
+      "comment": "5. Agent A yields. Normally this would give the lease to B..."
+    },
+    {
+      "action": "assert_broker_state",
+      "expectedState": "DRAINING",
+      "comment": "6. ...but the active Permit blocks transition, shifting it to DRAINING."
+    },
+    {
+      "action": "broker_request",
+      "endpoint": "/api/permit/execution/finish",
+      "agentId": "P",
+      "expectStatus": 200,
+      "comment": "7. Permit finishes execution, freeing the lock."
+    },
+    {
+      "action": "wait_broker_state",
+      "expectedState": "GRANTED",
+      "comment": "8. Resource naturally promotes Agent B to GRANTED."
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "name": "Status API and History Tracks",
+  "runner": "contract",
+  "description": "Tests public status API resolution parameters and ensures shell commands sent by the shim are properly aggregated in the history audit trails.",
+  "steps": [
+    {
+      "action": "request",
+      "agentId": "A",
+      "duration": 300,
+      "expectStatus": 200,
+      "comment": "1. Agent A acquires resource."
+    },
+    {
+      "action": "broker_request",
+      "endpoint": "/api/session/command",
+      "agentId": "A",
+      "payload": {
+        "command": "adb",
+        "args": [
+          "shell",
+          "ls"
+        ]
+      },
+      "expectStatus": 202,
+      "comment": "2. Agent A runs 'adb shell ls' via shim which notifies the broker."
+    },
+    {
+      "action": "assert_history",
+      "agentId": "A",
+      "expectedHistoryContains": "adb shell ls",
+      "comment": "3. History track evaluates correct appending formatting."
+    },
+    {
+      "action": "assert_broker_state",
+      "expectedState": "GRANTED",
+      "comment": "4. Verify rich state serialization operates correctly."
+    }
+  ]
+}
