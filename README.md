@@ -63,9 +63,10 @@ arbiter shim install ~/.arbiter/bin adb
 ```
 
 > [!IMPORTANT]
-> **Android SDK Hijacking (macOS/Linux):** In Android projects, `local.properties` often specifies an absolute path to `adb`, which can bypass a standard `$PATH` shim. When you run `arbiter shim install ... adb` on macOS/Linux, Arbiter will first offer to **hijack** your real SDK binary *before* writing the PATH shim. This renames your real `adb` to `adb.real` and replaces it with a smart router that only intercepts requests from agents (detected via `ARBITER_AGENT_SESSION=1`). The PATH shim is then pinned directly to `adb.real`, ensuring no double-invocation loop.
->
-> **Windows Limitation:** On Windows, Arbiter installs a `.cmd` shim that intercepts `adb` calls made through `PATH`. However, if a coding agent resolves `adb.exe` by its absolute SDK path (e.g. `C:\Users\<user>\AppData\Local\Android\Sdk\platform-tools\adb.exe`), it will **bypass the shim entirely** — Arbiter cannot intercept it. Native binary replacement (renaming `.exe` files) is not supported on Windows while the process is running. **The recommended mitigation is to use the `android` CLI shim instead of `adb` directly**, as `android` is resolved through `PATH` and does not have an absolute-path bypass problem.
+> **ADB Absolute Path Bypass:** In many Android projects, coding agents attempt to resolve the absolute SDK path to `adb` (e.g. via `local.properties`), which bypasses standard `$PATH` shims completely.
+> 
+> **To mitigate this:**
+> 1. **Install the Agent Skill:** Run `arbiter skills install adb` on the project root directory. This installs a context file (`.agents/skills/arbiter-adb/SKILL.md`) that explicitly teaches coding agents to use Arbiter leases and to never use absolute paths. This is a project-level skill (not a global setting) and should be initialized in each workspace. This is especially useful on Windows where binary hijacking is not supported.> 2. **Android SDK Hijacking (macOS/Linux):** When you run the shim install command on macOS/Linux, Arbiter will offer to proactively **hijack** your real SDK binary (renaming it to `adb.real` and replacing it with a smart router). This guarantees interception even if agents use the absolute path.
 
 > [!NOTE]
 > **`adb` and `android` share a device lease.** Acquiring a lease with `arbiter request adb` and acquiring one with `arbiter request android` compete for the **same underlying slot**. A token obtained for either tool is valid for both. This prevents two agents from colliding via different CLI front-ends on the same physical device.

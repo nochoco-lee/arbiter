@@ -173,6 +173,11 @@ COMMANDS:
                                  Example: arbiter shim install ~/.arbiter/bin adb
   shim uninstall <dir> [name]    Remove the Arbiter shim interceptor and revert any hijacking.
 
+  skills install <name>          Install an agent skill that guides coding agents on how to use 
+                                 Arbiter for coordinated resource access.
+                                 (Currently only 'adb' is supported; installs with 'arbiter-' prefix)
+                                 Example: arbiter skills install adb
+
 ENVIRONMENT:
   ARBITER_LEASE_TOKEN    Active lease token required for resource access.
   ARBITER_PORT           Communication port between Shim and Broker (Default: 38401).
@@ -264,7 +269,7 @@ async function main() {
 
     // Support native Node invocations overriding symlinks
     if (caller === 'index.ts' || caller === 'index.js' || caller === 'node') {
-        const arbiterCommands = ['start', 'tui', 'doctor', 'shim', 'logs', 'request', 'release', 'extend', 'lease', 'permit', 'estimate', 'state'];
+        const arbiterCommands = ['start', 'tui', 'doctor', 'shim', 'logs', 'request', 'release', 'extend', 'lease', 'permit', 'estimate', 'state', 'skills'];
         if (args.length > 0 && arbiterCommands.includes(args[0])) {
             caller = 'arbiter';
         } else if (args.length > 0 && !args[0].startsWith('--')) {
@@ -291,7 +296,7 @@ async function main() {
     // Exception: agents running `arbiter permit request` or `arbiter request` or installation routines do not have a lease yet!
     const isHelp = (caller === 'arbiter' && (args.length === 0 || args[0] === '-h' || args[0] === '--help'));
     const isTokenExempt = isHelp || isInstall || isUninstall || 
-                         (caller === 'arbiter' && (args[0] === 'request' || args[0] === 'start' || args[0] === 'tui' || args[0] === 'doctor' || args[0] === 'logs' || (args[0] === 'lease' && args[1] === 'status') || (args[0] === 'permit' && args[1] === 'request'))) || 
+                         (caller === 'arbiter' && (args[0] === 'skills' || args[0] === 'request' || args[0] === 'start' || args[0] === 'tui' || args[0] === 'doctor' || args[0] === 'logs' || (args[0] === 'lease' && args[1] === 'status') || (args[0] === 'permit' && args[1] === 'request'))) || 
                          (caller === 'index.js' && (args[0] === '--arbiter-install' || args[0] === '--arbiter-uninstall'));
 
     if (isHelp) {
@@ -389,7 +394,10 @@ async function main() {
 
     if (caller === 'arbiter') {
         const cmd = args[0];
-        if (cmd === 'start') {
+        if (cmd === 'skills') {
+            require('../cli/skills').handleSkillsCommand(args.slice(1));
+            return;
+        } else if (cmd === 'start') {
             require('../broker/server').startBroker();
             return;
         } else if (cmd === 'tui') {
