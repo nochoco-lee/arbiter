@@ -324,10 +324,10 @@ async function main() {
                 console.error(`${getTimestamp()} [ARBITER SHIM] State: current lease token is invalid or expired.`);
                 console.error(`${getTimestamp()} [ARBITER SHIM] Next: acquire a new lease before running '${caller}'.`);
                 console.error(`${getTimestamp()} [ARBITER SHIM] Choose '--wait' if this resource is needed now, or '--async' if you can keep working elsewhere first.`);
-                console.error(`${getTimestamp()} [ARBITER SHIM] Command: arbiter request ${requestAs} --wait`);
                 if (aliasPeer) {
                     console.error(`${getTimestamp()} [ARBITER SHIM] Note: a token for '${aliasPeer}' also covers '${requestAs}' — they share a device lease.`);
                 }
+                console.error(`${getTimestamp()} [ARBITER SHIM] Command: arbiter request ${requestAs} --wait`);
             }
             process.exit(1);
         }
@@ -338,10 +338,10 @@ async function main() {
         console.error(`${getTimestamp()} [ARBITER SHIM] State: no ARBITER_LEASE_TOKEN is set for this session.`);
         console.error(`${getTimestamp()} [ARBITER SHIM] Next: request a lease before running '${caller}'.`);
         console.error(`${getTimestamp()} [ARBITER SHIM] Choose '--wait' if device work is the immediate next step, or '--async' if other work can continue first.`);
-        console.error(`${getTimestamp()} [ARBITER SHIM] Command: arbiter request ${requestAs} --wait`);
         if (aliasPeer) {
             console.error(`${getTimestamp()} [ARBITER SHIM] Note: a token for '${aliasPeer}' also covers '${requestAs}' — they share a device lease.`);
         }
+        console.error(`${getTimestamp()} [ARBITER SHIM] Command: arbiter request ${requestAs} --wait`);
         process.exit(1);
     }
 
