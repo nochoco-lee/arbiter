@@ -893,7 +893,7 @@ async function main() {
                     const userPath = await new Promise<string>(resolve => {
                         readline.question(promptMsg, (ans: string) => resolve(ans.trim()));
                     });
-                    if (fs.existsSync(userPath)) {
+                    if (fs.existsSync(userPath) && fs.statSync(userPath).isFile()) {
                         try {
                             const content = fs.readFileSync(userPath, { encoding: 'utf8', flag: 'r' });
                             if (content.includes('[ARBITER SHIM]') || content.includes('dist/shim/index.js') || content.includes('ARBITER_REAL_') || content.includes('ARBITER_AGENT_SESSION')) {
