@@ -38,7 +38,7 @@ This project uses Arbiter to manage shared test bridges and hardware resources s
 When interacting with Android devices or emulators, you MUST follow these rules:
 
 1. **Do not use absolute paths to adb**: Avoid using the raw \`adb\` binary from the Android SDK path directly. Always rely on the \`adb\` available in your system \`PATH\`, as it may be shimmed by Arbiter to prevent resource conflicts.
-2. **Handle Lease Errors**: If your \`adb\` command fails due to a missing or expired Arbiter lease, you must acquire one first. Use \`arbiter request adb --wait\` to acquire an exclusive lease.
+2. **Handle Lease Errors**: If your \`adb\` command fails due to a missing or expired Arbiter lease, you must acquire one first. Use \`arbiter request adb --wait\` to acquire an exclusive lease. The output of this command will provide you with the exact command to export the lease token (e.g., \`export ARBITER_LEASE_TOKEN=...\`). **You MUST run the provided export command in your shell** before attempting your \`adb\` command again.
 3. **Prefer android-cli**: If \`android-cli\` is present and available in this project's skills, you should prioritize using it over direct \`adb\` commands, as it handles Arbiter leases automatically.
 `;
 
