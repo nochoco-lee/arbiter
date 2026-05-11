@@ -917,10 +917,12 @@ async function main() {
 
         if (shimName === 'adb' && process.platform !== 'win32') {
             console.log(`\n[ARBITER] ---------------------------------------------------`);
+            console.log(`[ARBITER] Auto-detected real binary at: ${discoveredPath}`);
             console.log(`[ARBITER] Notice: Due to Android's local.properties 'sdk.dir' setting,`);
             console.log(`[ARBITER] the shim you just installed might be bypassed by coding agents`);
             console.log(`[ARBITER] when they run Gradle commands or resolve absolute paths.`);
             console.log(`[ARBITER] We strongly recommend hijacking the real adb binary in your SDK.`);
+            console.log(`[ARBITER] (If the detected path above is /usr/bin/adb, it is highly recommended to provide the custom Android SDK path instead)`);
             console.log(`[ARBITER] ---------------------------------------------------\n`);
             
             const readline = require('readline').createInterface({
@@ -928,47 +930,88 @@ async function main() {
                 output: process.stdout
             });
 
+            let hijackTarget = '';
             const answer = await new Promise<string>(resolve => {
-                readline.question(`[ARBITER] Would you like to hijack the real Android SDK adb to guarantee interception? (y/N): `, (ans: string) => {
+                readline.question(`[ARBITER] Would you like to hijack a binary? (y/N/custom): `, (ans: string) => {
                     resolve(ans.trim().toLowerCase());
                 });
             });
 
             if (answer === 'y' || answer === 'yes') {
-                const finalSdkPath = path.dirname(discoveredPath);
-                const realBinaryPath = path.join(finalSdkPath, shimName);
+                 hijackTarget = discoveredPath;
+            } else if (answer === 'custom' || answer === 'c') {
+                 let promptMsg = `[ARBITER] Please enter the absolute path to the real SDK '${shimName}' binary:\n> `;
+                 let customPath = '';
+                 while (!customPath) {
+                     const userPath = await new Promise<string>(resolve => {
+                         readline.question(promptMsg, (ans: string) => resolve(ans.trim()));
+                     });
+                     if (fs.existsSync(userPath)) {
+                         customPath = userPath;
+                     } else {
+                         console.error(`[ARBITER] Error: File does not exist at '${userPath}'. Please try again.`);
+                     }
+                 }
+                 hijackTarget = customPath;
+            }
+
+            if (hijackTarget) {
+                const finalSdkPath = path.dirname(hijackTarget);
+                const realBinaryPath = hijackTarget;
+
+                let canHijack = true;
                 if (!fs.existsSync(realBinaryPath)) {
                     console.error(`[ARBITER] Error: Could not find '${shimName}' at ${realBinaryPath}.`);
-                    process.exit(1);
+                    canHijack = false;
                 }
 
-                try {
-                    const content = fs.readFileSync(realBinaryPath, 'utf8');
-                    if (content.includes('ARBITER_AGENT_SESSION') || content.includes('ARBITER_REAL_')) {
-                        console.error(`[ARBITER] Error: It looks like '${realBinaryPath}' is already an Arbiter smart shim!`);
-                        process.exit(1);
-                    }
-                } catch(e) {}
+                if (canHijack) {
+                    try {
+                        const content = fs.readFileSync(realBinaryPath, 'utf8');
+                        if (content.includes('ARBITER_AGENT_SESSION') || content.includes('ARBITER_REAL_')) {
+                            console.error(`[ARBITER] Error: It looks like '${realBinaryPath}' is already an Arbiter smart shim!`);
+                            canHijack = false;
+                        }
+                    } catch(e) {}
+                }
 
-                const renamedBinaryPath = path.join(finalSdkPath, `${shimName}.real`);
-                fs.renameSync(realBinaryPath, renamedBinaryPath);
+                if (canHijack) {
+                    const renamedBinaryPath = path.join(finalSdkPath, `${shimName}.real`);
+                    try {
+                        fs.renameSync(realBinaryPath, renamedBinaryPath);
 
-                const wrapperContent = `#!/bin/bash\n` +
+                        const wrapperContent = `#!/bin/bash\n` +
 `if [ "$ARBITER_AGENT_SESSION" = "1" ]; then\n` +
 `    export ARBITER_REAL_${shimName.toUpperCase()}_PATH="${renamedBinaryPath}"\n` +
 `    exec "${process.execPath}" "${path.resolve(__filename)}" "${shimName}" "$@"\n` +
 `else\n` +
 `    exec "${renamedBinaryPath}" "$@"\n` +
 `fi\n`;
-                fs.writeFileSync(realBinaryPath, wrapperContent);
-                fs.chmodSync(realBinaryPath, '755');
-                
-                console.log(`[ARBITER] Success! Hijacked ${shimName} at ${finalSdkPath}`);
-                console.log(`[ARBITER] Original binary renamed to ${shimName}.real`);
-                console.log(`[ARBITER] Humans will bypass Arbiter instantly. Agents with ARBITER_AGENT_SESSION=1 will route through Arbiter leases.`);
-                
-                // Point the PATH shim directly to the .real binary so we don't trigger the Node shim twice
-                targetRealBinary = renamedBinaryPath;
+                        fs.writeFileSync(realBinaryPath, wrapperContent);
+                        fs.chmodSync(realBinaryPath, '755');
+                        
+                        console.log(`[ARBITER] Success! Hijacked ${shimName} at ${finalSdkPath}`);
+                        console.log(`[ARBITER] Original binary renamed to ${shimName}.real`);
+                        console.log(`[ARBITER] Humans will bypass Arbiter instantly. Agents with ARBITER_AGENT_SESSION=1 will route through Arbiter leases.`);
+                        
+                        // Point the PATH shim directly to the .real binary so we don't trigger the Node shim twice
+                        targetRealBinary = renamedBinaryPath;
+                    } catch (e: any) {
+                        if (e.code === 'EACCES' || e.code === 'EPERM') {
+                            console.error(`[ARBITER] Warning: Permission denied when attempting to hijack ${realBinaryPath}.`);
+                            console.error(`[ARBITER] The binary could not be hijacked. You may need to run this command with 'sudo' or configure it manually.`);
+                        } else {
+                            console.error(`[ARBITER] Failed to hijack binary: ${e.message}`);
+                        }
+                        
+                        // Revert any partial rename if we failed writing the wrapper
+                        try {
+                            if (fs.existsSync(renamedBinaryPath) && !fs.existsSync(realBinaryPath)) {
+                                fs.renameSync(renamedBinaryPath, realBinaryPath);
+                            }
+                        } catch (revertErr) {}
+                    }
+                }
             }
             readline.close();
         }
