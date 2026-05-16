@@ -8,11 +8,11 @@ export function handleSkillsCommand(args: string[]) {
     }
 
     if (args[0] === 'install') {
-        const skillName = args[1];
-        if (skillName === 'adb') {
-            installAdbSkill();
+        const skillName = args[1] || 'arbiter';
+        if (skillName === 'arbiter' || skillName === 'adb') {
+            installArbiterSkill();
         } else {
-            console.error(`[ARBITER] Unknown skill: ${skillName}. Only 'adb' is supported currently.`);
+            console.error(`[ARBITER] Unknown skill: ${skillName}. Only 'arbiter' is supported currently.`);
             process.exit(1);
         }
     } else {
@@ -21,27 +21,62 @@ export function handleSkillsCommand(args: string[]) {
     }
 }
 
-function installAdbSkill() {
+function installArbiterSkill() {
     const cwd = process.cwd();
-    const skillsDir = path.join(cwd, '.agents', 'skills', 'arbiter-adb');
+    const skillsDir = path.join(cwd, '.agents', 'skills', 'arbiter');
     fs.mkdirSync(skillsDir, { recursive: true });
 
     const skillPath = path.join(skillsDir, 'SKILL.md');
     const content = `---
-name: arbiter-adb
-description: This skill must be used when doing anything with adb or managing android devices / emulators. If android-cli is present, it should be used instead.
+name: arbiter
+description: How to safely run device and emulator commands (adb, android, sdb, simctl) in this workspace. This project uses Arbiter to broker exclusive hardware leases — device commands will fail without a valid lease token. Use this skill whenever interacting with physical devices, emulators, or device management CLIs.
 ---
 
-# Arbiter ADB Guidelines
+# Arbiter Device Management Rules
 
-This project uses Arbiter to manage shared test bridges and hardware resources safely. 
-When interacting with Android devices or emulators, you MUST follow these rules:
+This workspace uses **Arbiter**, a resource broker that manages exclusive leases for shared hardware devices and emulators. Device commands like \`adb\`, \`android\`, \`sdb\`, and \`simctl\` are intercepted by Arbiter shims — without a valid lease token they will fail. The rules below explain how to work with this system.
 
-1. **Do not use absolute paths to adb**: Avoid using the raw \`adb\` binary from the Android SDK path directly. Always rely on the \`adb\` available in your system \`PATH\`, as it may be shimmed by Arbiter to prevent resource conflicts.
-2. **Handle Lease Errors**: If your \`adb\` command fails due to a missing or expired Arbiter lease, you must acquire one first. Use \`arbiter request adb --wait\` to acquire an exclusive lease. The output of this command will provide you with the exact command to export the lease token (e.g., \`export ARBITER_LEASE_TOKEN=...\`). **You MUST run the provided export command in your shell** before attempting your \`adb\` command again.
-3. **Prefer android-cli**: If \`android-cli\` is present and available in this project's skills, you should prioritize using it over direct \`adb\` commands, as it handles Arbiter leases automatically.
+## 1. Never Bypass the Shim
+Arbiter intercepts device commands via \`$PATH\` shims. Using absolute paths to SDK binaries (e.g., \`/usr/bin/adb\`, \`C:\\\\...\\\\adb.exe\`) bypasses Arbiter entirely and will cause conflicts with other agents. Always use the base command name (e.g., \`adb\`, \`android\`) so Arbiter can manage the lease.
+
+## 2. Recognizing Lease Errors
+If you run a device command without an active lease, Arbiter will intercept it and output an error like:
+> \`[ARBITER SHIM] State: no ARBITER_LEASE_TOKEN is set for this session.\`
+> \`[ARBITER SHIM] Next: request a lease before running...\`
+
+## 3. Acquiring a Lease
+Request an exclusive lease using the Arbiter CLI. The \`--wait\` flag will block until the resource is free rather than failing immediately:
+\`\`\`bash
+arbiter request <resource_name> --wait
+# Example for Android: arbiter request adb --wait
+# Example for Tizen:   arbiter request sdb --wait
+\`\`\`
+
+## 4. Exporting the Token
+The \`arbiter request\` command outputs an export command with your lease token. Run that command in your current shell session before retrying the device command — the token must be in the environment or Arbiter will block the command again.
+
+**Linux/macOS:**
+\`\`\`bash
+export ARBITER_LEASE_TOKEN=eyJhbGci...
+\`\`\`
+
+**Windows (PowerShell):**
+\`\`\`powershell
+$env:ARBITER_LEASE_TOKEN="eyJhbGci..."
+\`\`\`
+
+**Windows (Command Prompt):**
+\`\`\`cmd
+set ARBITER_LEASE_TOKEN=eyJhbGci...
+\`\`\`
+
+## 5. Releasing the Lease
+When you have completely finished all device interactions for the task, release the lease so other agents or developers can use the hardware:
+\`\`\`bash
+arbiter release
+\`\`\`
 `;
 
     fs.writeFileSync(skillPath, content, 'utf8');
-    console.log(`[ARBITER] Successfully installed 'adb' skill at ${skillPath}`);
+    console.log(`[ARBITER] Successfully installed 'arbiter' skill at ${skillPath}`);
 }
