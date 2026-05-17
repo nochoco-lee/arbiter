@@ -18,7 +18,7 @@ async function testZombieStorm() {
         for (let i = 0; i < count; i++) {
             const resName = createUniqueResource(`zombie-${i}`);
             // Small duration but long enough to acquire
-            await requestLease(port, resName, 5);
+            await requestLease(broker.port, resName, 5);
         }
 
         console.log("- Awaiting watchdog cleanup (35s)...");
@@ -26,7 +26,7 @@ async function testZombieStorm() {
 
         console.log("- Verifying all resources are FREE...");
         const resStatus = await new Promise<any>((resolve) => {
-            http.get(`http://127.0.0.1:${port}/status`, (res) => {
+            http.get(`http://127.0.0.1:${broker.port}/status`, (res) => {
                 let d = ''; res.on('data', c => d+=c); res.on('end', () => resolve(JSON.parse(d)));
             });
         });

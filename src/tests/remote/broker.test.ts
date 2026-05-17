@@ -12,11 +12,12 @@ describe('Remote Broker Execution (WebSocket)', () => {
     const AUTH_SECRET = 'test-secret';
 
     before(async () => {
-        port = allocatePort();
-        broker = await startBrokerWithEnv(port, {
+        const initialPort = allocatePort();
+        broker = await startBrokerWithEnv(initialPort, {
             ARBITER_AUTH_SECRET: AUTH_SECRET,
             ARBITER_BIND: '127.0.0.1'
         });
+        port = broker.port;
 
         const reqRes = await brokerRequest(port, '/request', {
             resource: 'mock',

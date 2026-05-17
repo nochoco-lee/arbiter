@@ -1,266 +1,351 @@
 <div align="center">
   <h1>Arbiter (Alpha)</h1>
-  <p><b>Agentic Resource Broker &amp; Interceptor for Test Engineering Run-times</b></p>
-  <p>A lightweight lease broker and shim system designed to help coordinate access for coding agents. It aims to reduce collisions when autonomous agents (like Claude Code, Codex, or OpenCode) target limited external hardware bridges like Android Emulators, bare-metal IoT boards, and native displays.</p>
+  <p><b>Lease-Based Resource Coordination for Autonomous Coding Agents</b></p>
+  <p>A lightweight lease broker that coordinates access to shared hardware resources between autonomous coding agents.</p>
 </div>
 
 <br>
 
 ---
 
-## 💻 System Requirements
+## Why Arbiter Exists
+Modern coding agents frequently execute tasks in parallel:
+* autonomous debugging
+* deployment loops
+* test execution
+* log collection
+* device automation
 
-Arbiter requires **Node.js 18.0.0 or higher**.
+But many hardware bridges and emulators can only be safely controlled by one process at a time.
 
-If you are using an older version of Ubuntu (e.g., 20.04 or 22.04), the default `apt` version of Node.js is likely too old. We recommend installing a modern version via [NodeSource](https://github.com/nodesource/distributions):
+Without coordination:
+* agents overwrite each other's device sessions
+* concurrent workflows interfere with each other's logging and device state
+* deployments race each other
+* flaky false-negative failures appear
 
+Arbiter adds a lightweight lease layer on top of existing CLI tooling to coordinate access between agents.
+
+> [!NOTE]
+> While the built-in shims currently focus on Android (`adb`) workflows, the broker itself is resource-agnostic and designed to coordinate any exclusive local resource.
+
+---
+
+## Architecture
+Arbiter works by intercepting device CLI commands through lightweight shims.
+The shim checks lease ownership with a local broker daemon before forwarding execution to the real underlying binary.
+
+```text
+Coding Agent
+     │
+     ▼
+ Arbiter Shim  ◄────►  Arbiter Broker
+     │                  (leases, queues, ownership)
+     ▼
+Real Device / Emulator
+```
+
+This allows multiple autonomous agents to share hardware safely without modifying the underlying tools themselves.
+
+---
+
+## Quick Start (2 Minutes)
+
+### 1. Install and Start the Broker
 ```bash
-# Example for Ubuntu/Debian to install Node.js 20
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+npm install -g @nochoco-lee/arbiter
+arbiter start
+```
+
+### 2. Install the adb Shim
+```bash
+arbiter shim install ~/.arbiter/bin adb
+```
+
+### 3. Simulate an Agent Session
+
+The steps below simulate how a coding agent interacts with Arbiter internally.
+
+In a real setup, the agent skill handles lease acquisition and token propagation automatically. Here, we run the commands manually to demonstrate how the coordination flow works.
+
+Configure the shell the way an autonomous coding agent session would be launched:
+```bash
+export PATH=~/.arbiter/bin:$PATH
+export ARBITER_AGENT_SESSION=1
+```
+
+Now try running a device command without a lease:
+```bash
+adb shell
+```
+The shim intercepts the command:
+```text
+[ARBITER SHIM] State: no ARBITER_LEASE_TOKEN is set.
+[ARBITER SHIM] Next: request a lease before running 'adb'.
+[ARBITER SHIM] Command: arbiter request adb --wait
+```
+
+Request a lease:
+```bash
+arbiter request adb --wait
+```
+Example output:
+```text
+export ARBITER_LEASE_TOKEN=token-uuid-1234
+```
+
+Run commands with the token:
+```bash
+ARBITER_LEASE_TOKEN=token-uuid-1234 adb shell
+```
+
+Release the lease:
+```bash
+arbiter release
+```
+
+In normal agent workflows, lease acquisition and token handling are typically automated through the installed Arbiter skill.
+
+---
+
+## System Requirements
+Arbiter requires:
+* Node.js 18+
+
+Older Ubuntu releases may ship outdated Node.js packages through apt. Example installation using NodeSource:
+```bash
+curl -fsSL [https://deb.nodesource.com/setup_20.x](https://deb.nodesource.com/setup_20.x) | sudo -E bash -
 sudo apt-get install -y nodejs
 ```
 
 ---
 
-## ⚡ Setup
+## Full Setup Guide
 
-As autonomous coding agents automate development and testing tasks, they may encounter issues when trying to access the same localized system resource simultaneously. **Arbiter** provides a central authority to coordinate these requests.
-
-### Step 1 — Install & Start the Broker
-
+### Step 1 — Install and Start the Broker
 ```bash
 npm install -g @nochoco-lee/arbiter
-
-# Start the Broker Daemon in the background
 arbiter start
 ```
 
-### Step 2 — Install the Shims (`android` + `adb`)
+### Step 2 — Install Device Shims
+Arbiter replaces device CLI commands with lightweight shims that enforce lease ownership before execution.
 
-Arbiter replaces device CLI commands with shims that enforce lease ownership before executing. For Android, install **both** shims — they are complementary, not alternatives:
+Available shims:
+* `adb` — required for Android workflows
+* `android` — optional companion shim for higher-level tooling
 
-- **`android`** — high-level commands: `android run`, `android emulator`, build tooling.
-- **`adb`** — low-level device access: `adb shell`, `adb logcat`, file push/pull, etc.
+Both tools share the same lease slot.
 
-Both shims share the **same device lease slot** — one token covers both tools.
-
-**macOS/Linux:**
+#### macOS / Linux
 ```bash
-arbiter shim install ~/.arbiter/bin android
 arbiter shim install ~/.arbiter/bin adb
+arbiter shim install ~/.arbiter/bin android
 ```
 
-**Windows (PowerShell as Administrator):**
+#### Windows (PowerShell)
 ```powershell
-# Arbiter will create the folder automatically if it doesn't exist
-arbiter shim install C:\Arbiter\bin android
 arbiter shim install C:\Arbiter\bin adb
+arbiter shim install C:\Arbiter\bin android
 ```
 
 > [!IMPORTANT]
-> **ADB Absolute Path Bypass:** Many Android projects and Gradle builds resolve `adb` to its absolute SDK path (e.g. via `local.properties`), which bypasses `$PATH` shims completely.
->
-> **Mitigations:**
-> 1. **Agent Skill (Step 3 below):** Explicitly instructs agents never to use absolute paths. Essential on Windows.
-> 2. **SDK Hijacking (macOS/Linux only):** When installing the `adb` shim on macOS/Linux, Arbiter will offer to rename the real binary to `adb.real` and replace it with a smart router — guaranteeing interception even when agents use the absolute path.
+> Many Android projects bypass $PATH completely and invoke adb using an absolute SDK path (for example through Gradle or local.properties).
+> Arbiter supports two mitigation strategies:
+> 1. Agent instructions that explicitly forbid absolute-path adb
+> 2. Optional SDK binary replacement on macOS/Linux (adb → adb.real)
 
 > [!TIP]
-> If Arbiter cannot auto-discover the target binary in your `PATH` during installation, it will prompt you for the absolute path. For `adb`, a platform-specific example is shown (e.g. `C:\Users\<user>\AppData\Local\Android\Sdk\platform-tools\adb.exe` on Windows).
+> If Arbiter cannot automatically discover the real binary location, it will prompt for the absolute path during installation.
 
 ### Step 3 — Install the Agent Skill
+Arbiter provides a built-in skill file that teaches coding agents:
+* how to request leases
+* how to pass tokens
+* why absolute paths must be avoided
 
-Arbiter provides a built-in skill file that teaches coding agents how to interact with device resources cooperatively: when to request a lease, how to pass the token, and why absolute paths must be avoided.
-
-Run this command in your **project's root directory**:
-
+Run this inside your project root:
 ```bash
 arbiter skills install arbiter
 ```
+This generates: `.agents/skills/arbiter/SKILL.md`. Repeat this for each workspace where agents operate.
 
-This generates `.agents/skills/arbiter/SKILL.md` — a project-level context file that most coding agent frameworks pick up automatically. Repeat this in each workspace where agents operate.
+### Step 4 — Launch Agents with PATH Separation
+Agents should use shimmed binaries while humans continue using the real system tools. Do not add the Arbiter shim directory to your global system PATH. Instead, prepend it only inside the agent launcher environment.
 
-### Step 4 — Launch Your Agent with PATH Separation
-
-To allow agents to use the shims while humans continue using the real tools, prepend the shim directory inside a launcher script and set `ARBITER_AGENT_SESSION=1` to enable smart routing.
-
-> [!WARNING]
-> Do **not** add the Arbiter shim directory to your global system or user `PATH`. This would intercept your own manual terminal commands.
-
-**Linux/macOS — `agent_start.sh`:**
+#### Linux / macOS
 ```bash
 export PATH=~/.arbiter/bin:$PATH
 export ARBITER_AGENT_SESSION=1
-claude  # or: codex, opencode, etc.
+
+claude
 ```
 
-**Windows PowerShell:**
+#### Windows PowerShell
 ```powershell
 $env:Path = "C:\Arbiter\bin;" + $env:Path
 $env:ARBITER_AGENT_SESSION = "1"
+
 claude
 ```
 
-**Windows Command Prompt:**
+#### Windows Command Prompt
 ```cmd
 set PATH=C:\Arbiter\bin;%PATH%
 set ARBITER_AGENT_SESSION=1
+
 claude
-```
-
-### Uninstallation
-
-To remove a shim and automatically revert any hijacked binaries:
-
-```bash
-# macOS/Linux
-arbiter shim uninstall ~/.arbiter/bin android
-arbiter shim uninstall ~/.arbiter/bin adb
-
-# Windows (PowerShell as Administrator)
-arbiter shim uninstall C:\Arbiter\bin android
-arbiter shim uninstall C:\Arbiter\bin adb
 ```
 
 ---
 
-## 🤖 How Agents Use Arbiter
+## How Agents Use Arbiter
+Arbiter is intentionally hint-driven. If an agent attempts to access a protected resource without a lease, the shim explains exactly how to recover.
 
-Arbiter is **hint-driven** — if an agent runs a device command without a lease, the shim intercepts it and prints exactly what to do next.
-
-### Automatic Interception (The "Oops" Path)
-
-If an agent runs `android run` without a lease, the shim outputs:
+Example output:
 ```text
-[14:30:01.123] [ARBITER SHIM] State: no ARBITER_LEASE_TOKEN is set for this session.
-[14:30:01.124] [ARBITER SHIM] Next: request a lease before running 'android'.
-[14:30:01.125] [ARBITER SHIM] Command: arbiter request android --wait
-[14:30:01.126] [ARBITER SHIM] Note: a token for 'adb' also covers 'android' — they share a device lease.
+[ARBITER SHIM] State: no ARBITER_LEASE_TOKEN is set.
+[ARBITER SHIM] Next: request a lease before running 'adb'.
+[ARBITER SHIM] Command: arbiter request adb --wait
+[ARBITER SHIM] Note: adb and android share the same lease.
 ```
 
-### Lease Cycle
+### Lease Lifecycle
 
-**1. Request a Lease**
-
+#### 1. Request a Lease
 ```bash
-arbiter request android --wait
-# Output includes the lease token, e.g.:
-# export ARBITER_LEASE_TOKEN=token-uuid-1234   <-- note this value
+arbiter request adb --wait
+```
+Example output:
+```text
+export ARBITER_LEASE_TOKEN=token-uuid-1234
 ```
 
-> [!NOTE]
-> `arbiter request adb --wait` is identical — `adb` and `android` share the same lease slot. The token is valid for both shims.
+#### 2. Run Device Commands
+Coding agents frequently spawn isolated shell sessions for each command they execute. Because environment variables may not persist between invocations, the safest pattern is to pass the lease token inline with every device command.
 
-**2. Run Device Commands (pass the token inline)**
-
-Coding agents frequently spawn a **new, isolated shell session** for each command they run, so a one-time `export` may not carry over. The safest pattern is to provide the token on the **same line** as each device command:
-
+##### Linux/macOS
 ```bash
-# Linux/macOS — inline prefix
-ARBITER_LEASE_TOKEN=token-uuid-1234 android run --apks=my-app.apk
-ARBITER_LEASE_TOKEN=token-uuid-1234 adb shell dumpsys battery
+ARBITER_LEASE_TOKEN=token-uuid-1234 adb install app.apk
 ARBITER_LEASE_TOKEN=token-uuid-1234 adb logcat -d
+ARBITER_LEASE_TOKEN=token-uuid-1234 adb shell dumpsys battery
 ```
 
+##### Windows PowerShell
 ```powershell
-# Windows PowerShell — set and run in one statement
-$env:ARBITER_LEASE_TOKEN='token-uuid-1234'; android run --apks=my-app.apk
 $env:ARBITER_LEASE_TOKEN='token-uuid-1234'; adb logcat -d
 ```
 
+##### Windows Command Prompt
 ```cmd
-:: Windows Command Prompt — chain with &&
-set ARBITER_LEASE_TOKEN=token-uuid-1234 && android run --apks=my-app.apk
+set ARBITER_LEASE_TOKEN=token-uuid-1234 && adb logcat -d
 ```
 
 > [!TIP]
-> **Human / interactive testing:** If you are running commands manually in a single terminal session, a one-time `export ARBITER_LEASE_TOKEN=...` (or `$env:` / `SET`) is perfectly fine — your shell retains the variable for the full session. The inline pattern is specifically needed for coding agents.
+> Human-operated interactive terminals can safely use a normal one-time export. The inline pattern mainly exists for autonomous agents that spawn isolated command sessions.
 
-**3. Release the Lease**
+#### 3. Release the Lease
 ```bash
 arbiter release
 ```
 
 ---
 
-## 🕵️ Human Monitoring & Diagnostics
+## Monitoring and Diagnostics
 
-These tools are designed for human operators to monitor the health of the hardware pool and the status of the broker.
-
-### Terminal Dashboard (TUI)
-Launch the interactive dashboard to see all resources, queue depths, and current owners in real-time.
+### Interactive Dashboard
 ```bash
 arbiter tui
 ```
+Displays:
+* active leases
+* queue depth
+* current owners
+* resource states
 
-### System Health (Doctor)
-Check if native binaries (adb, xcrun, etc.) are correctly mapped and if the broker is reachable.
+### Health Check
 ```bash
 arbiter doctor
 ```
+Verifies:
+* broker connectivity
+* binary mappings
+* shim configuration
 
 ### Broker Logs
 ```bash
-# Stream live logs in real-time (Watchdog events, Queue promotions, etc.)
 arbiter logs --follow
-
-# Print the last 50 log lines
 arbiter logs --limit 50
 ```
 
 ### Resource Status
 ```bash
-# Check if a specific resource is currently held or free
-arbiter lease status --resource android
+arbiter lease status --resource adb
 ```
 
 ---
 
-## 🎭 Scenario: 1 Emulator, 2 Agents
+## Example Scenario: One Emulator, Two Agents
 
-1. **Start the Broker**: `arbiter start` (Keep this running in terminal 1)
-2. **Install the Shims**: `arbiter shim install /tmp/arbiter_shims android && arbiter shim install /tmp/arbiter_shims adb`
-3. **Agent A (Terminal 2)**:
-   ```bash
-   export PATH=/tmp/arbiter_shims:$PATH
-   arbiter request android --wait --duration 30
-   # Note the printed token, e.g.: ARBITER_LEASE_TOKEN=<token-from-output>
-   # Pass it inline with every device command (agents spawn isolated sessions):
-   ARBITER_LEASE_TOKEN=<token-from-output> android run --apks=app1.apk
-   ARBITER_LEASE_TOKEN=<token-from-output> adb logcat -d
-   # Do NOT release yet.
-   ```
-4. **Agent B (Terminal 3)**:
-   ```bash
-   export PATH=/tmp/arbiter_shims:$PATH
-   # Intercepted — Agent B has no lease token
-   android run --apks=app2.apk
-   # [ARBITER SHIM] State: no ARBITER_LEASE_TOKEN...
-   # [ARBITER SHIM] Command: arbiter request android --wait
+### Agent A
+```bash
+export PATH=/tmp/arbiter_shims:$PATH
 
-   # Blocks until Agent A releases:
-   arbiter request android --wait
-   # Once granted, run inline:
-   ARBITER_LEASE_TOKEN=<agent-b-token> android run --apks=app2.apk
-   ```
-5. **Release Lease (Terminal 2)**: `arbiter release`
-6. **Agent B Unblocks**: Receives the lease and proceeds automatically.
+arbiter request adb --wait
 
----
+ARBITER_LEASE_TOKEN=<token> adb install app1.apk
+ARBITER_LEASE_TOKEN=<token> adb logcat -d
+```
+Agent A now owns the device lease.
 
-## 🛠️ Core Features
+### Agent B
+```bash
+export PATH=/tmp/arbiter_shims:$PATH
 
-- **Basic Locking:** Mutex-based access to physical/virtual resources.
-- **Warm Leases (`AVAILABLE` State):** Preemptible leases for improved efficiency.
-- **Async Shift:** Automatically converts long-waiting requests into ASYNC reservation tickets.
-- **Handoff Management (`DRAINING` State):** Ensures one-time commands finish before resource reallocation.
-- **Audit Trails:** Rolling history of the last 100 commands per resource.
-- **Cooperative Permits:** Allows agents to request shared, one-time access for read-only tasks.
+adb install app2.apk
+```
+The shim blocks execution:
+```text
+[ARBITER SHIM] State: no ARBITER_LEASE_TOKEN is set.
+[ARBITER SHIM] Command: arbiter request adb --wait
+```
+Request the lease:
+```bash
+arbiter request adb --wait
+```
+Agent B waits until Agent A releases ownership. Once released, Agent B automatically acquires the lease and continues.
 
 ---
 
-## 📊 Testing & Contributing
+## Core Features
+* Lease-based resource locking
+* Queueing and ownership tracking
+* Shared lease groups (adb + android)
+* Graceful handoff during active commands
+* Cooperative read-only permits
+* Interactive terminal dashboard
+* Audit history per resource
+* Async reservation support for long waits
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for instructions on building from source, running the test suite, and adding new adapters.
+---
+
+## What Arbiter Does Not Do
+Arbiter does not:
+* virtualize hardware
+* sandbox processes
+* isolate environments
+* proxy device traffic
+
+It only coordinates ownership and execution sequencing.
+
+---
+
+## Contributing
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for:
+* local development setup
+* testing
+* adapter implementation
+* broker internals
 
 ## License
-MIT License
+MIT

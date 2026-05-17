@@ -20,7 +20,7 @@ test('Thundering Herd Concurrency', async (t) => {
         // Detonate 50 simultaneous parallel requests
         for (let i = 0; i < CONCURRENCY; i++) {
             promises.push(new Promise((resolve) => {
-                const req = http.request(`http://127.0.0.1:${port}/request`, {
+                const req = http.request(`http://127.0.0.1:${broker.port}/request`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' }
                 }, (res) => {
@@ -62,7 +62,7 @@ test('Thundering Herd Concurrency', async (t) => {
 
         // Verify queue depth on the broker matches
         const statusReq = await new Promise<any>((resolve) => {
-            http.get(`http://127.0.0.1:${port}/status?resource=${resource}`, (res) => {
+            http.get(`http://127.0.0.1:${broker.port}/status?resource=${resource}`, (res) => {
                 let d = '';
                 res.on('data', c => d += c);
                 res.on('end', () => resolve(JSON.parse(d)));

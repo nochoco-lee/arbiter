@@ -742,9 +742,14 @@ export const startBroker = () => {
   });
 
   server.listen(PORT, BIND_HOST, () => {
-    log(`ARBITER Broker running on http://${BIND_HOST}:${PORT}`);
+    const boundPort = (server.address() as { port: number }).port;
+    // Emit a structured ready-line so the test harness can discover the
+    // actual port when PORT=0 (OS-assigned). Must go to stdout directly
+    // so it is always parseable regardless of log buffering.
+    process.stdout.write(`ARBITER_PORT_READY=${boundPort}\n`);
+    log(`ARBITER Broker running on http://${BIND_HOST}:${boundPort}`);
     if (BIND_HOST !== '127.0.0.1') {
-        log(`[Broker] Remote Broker mode active — listening on ${BIND_HOST}:${PORT}`);
+        log(`[Broker] Remote Broker mode active — listening on ${BIND_HOST}:${boundPort}`);
         if (!process.env.ARBITER_AUTH_SECRET) {
             warn(`[Broker] WARNING: ARBITER_AUTH_SECRET is not set. Remote connections are unauthenticated.`);
         }

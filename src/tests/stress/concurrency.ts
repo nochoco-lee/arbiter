@@ -19,10 +19,10 @@ async function testConcurrencyStress() {
         const promises = [];
         for (let i = 0; i < count; i++) {
             promises.push((async (id) => {
-                const res = await requestLease(port, resource, 300, true);
+                const res = await requestLease(broker.port, resource, 300, true);
                 if (res.status !== 200) throw new Error(`Agent ${id} failed`);
                 // Release immediately to let next one through
-                await yieldLease(port, res.data.token);
+                await yieldLease(broker.port, res.data.token);
                 return id;
             })(i));
         }

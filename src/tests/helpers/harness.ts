@@ -24,10 +24,10 @@ export class BrokerInstance {
     }
 }
 
-let nextPort = 38401 + Math.floor(Math.random() * 1000);
-
+// Always use port 0 — the OS assigns a free ephemeral port, eliminating
+// any possibility of collision on shared CI runners.
 export function allocatePort(): number {
-    return nextPort++;
+    return 0;
 }
 
 export function createUniqueResource(name: string): string {
@@ -39,23 +39,30 @@ export function delay(ms: number) {
     return new Promise(r => setTimeout(r, ms));
 }
 
-export async function waitForPort(port: number, timeoutMs: number = 20000): Promise<void> {
-    const start = Date.now();
-    while (Date.now() - start < timeoutMs) {
-        try {
-            await new Promise((resolve, reject) => {
-                const socket = new (require('net').Socket)();
-                socket.setTimeout(500);
-                socket.on('connect', () => { socket.destroy(); resolve(true); });
-                socket.on('error', (e: any) => { socket.destroy(); reject(e); });
-                socket.connect(port, '127.0.0.1');
-            });
-            return;
-        } catch (e) {
-            await delay(500);
-        }
-    }
-    throw new Error(`Timeout waiting for port ${port}`);
+// Wait for the broker child process to emit ARBITER_PORT_READY=<port> on
+// stdout. This is the only reliable signal that the server is fully bound
+// and accepting connections — no TCP polling, no races.
+export function waitForBrokerReady(
+    proc: ChildProcess,
+    timeoutMs: number = 20000
+): Promise<number> {
+    return new Promise((resolve, reject) => {
+        let buf = '';
+        const timer = setTimeout(() => {
+            reject(new Error(`Timeout waiting for broker ARBITER_PORT_READY signal`));
+        }, timeoutMs);
+
+        const onData = (chunk: Buffer | string) => {
+            buf += chunk.toString();
+            const match = buf.match(/ARBITER_PORT_READY=(\d+)/);
+            if (match) {
+                clearTimeout(timer);
+                proc.stdout!.off('data', onData);
+                resolve(parseInt(match[1], 10));
+            }
+        };
+        proc.stdout!.on('data', onData);
+    });
 }
 
 export async function startBrokerInstance(port: number): Promise<BrokerInstance> {
@@ -63,7 +70,7 @@ export async function startBrokerInstance(port: number): Promise<BrokerInstance>
 }
 
 export async function startBrokerWithEnv(port: number, env: Record<string, string>): Promise<BrokerInstance> {
-    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), `arbiter-test-${port}-`));
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), `arbiter-test-`));
     const tdbConfigFile = path.join(testDir, `tdb_config.json`);
     fs.writeFileSync(tdbConfigFile, JSON.stringify([]));
 
@@ -76,7 +83,7 @@ export async function startBrokerWithEnv(port: number, env: Record<string, strin
         env: {
             ...process.env,
             ...env,
-            ARBITER_PORT: port.toString(),
+            ARBITER_PORT: port.toString(), // 0 = OS assigns a free port
             ARBITER_TEST_MODE: 'true',
             ARBITER_SKIP_ARTIFACTS: 'true',
             ARBITER_CONTEXT_DIR: testDir,
@@ -86,9 +93,12 @@ export async function startBrokerWithEnv(port: number, env: Record<string, strin
         }
     });
 
-    brokerProc.stdout.on('data', d => console.log(`[BROKER-${port}] ` + d.toString().trim()));
-    brokerProc.stderr.on('data', d => console.error(`[BROKER-${port} ERR] ` + d.toString().trim()));
+    // Discover the actual bound port from the broker's stdout ready-signal
+    // before attaching the logging forwarder (which would consume the data).
+    const boundPort = await waitForBrokerReady(brokerProc);
 
-    await waitForPort(port);
-    return new BrokerInstance(port, brokerProc, tdbConfigFile);
+    brokerProc.stdout!.on('data', d => console.log(`[BROKER-${boundPort}] ` + d.toString().trim()));
+    brokerProc.stderr!.on('data', d => console.error(`[BROKER-${boundPort} ERR] ` + d.toString().trim()));
+
+    return new BrokerInstance(boundPort, brokerProc, tdbConfigFile);
 }

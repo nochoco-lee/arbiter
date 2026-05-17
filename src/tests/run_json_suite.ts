@@ -25,7 +25,7 @@ async function runJsonSuite() {
         
         let runnerError = null;
         try {
-            const runner = new JsonTestRunner(port, resource);
+            const runner = new JsonTestRunner(broker.port, resource);
             await runner.run(schema);
         } catch (e: any) {
             runnerError = e;
