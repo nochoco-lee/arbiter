@@ -149,32 +149,47 @@ Agents should follow this pattern for reliable execution:
 # Linux/macOS
 arbiter request android --wait
 # Output: [ARBITER] Granted Access to: android
-export ARBITER_LEASE_TOKEN=token-uuid-1234
+# Output: export ARBITER_LEASE_TOKEN=token-uuid-1234   <-- copy this token
 ```
 
 ```powershell
 # Windows PowerShell
 arbiter request android --wait
-# Arbiter outputs both formats — copy the one matching your shell:
-$env:ARBITER_LEASE_TOKEN='token-uuid-1234'
+# Arbiter outputs multiple formats — note the token value printed
 ```
 
 ```cmd
 :: Windows Command Prompt
 arbiter request android --wait
-SET ARBITER_LEASE_TOKEN=token-uuid-1234
+:: Note the token value printed
 ```
 
 > [!NOTE]
 > `arbiter request adb --wait` works identically — `adb` and `android` share the same device lease slot. The token returned is valid for both `adb` and `android` shims.
 
-**2. Execute Commands**
+**2. Execute Commands (pass the token inline)**
+
+Coding agents commonly spawn a **new, isolated shell session** for every command they run. A one-time `export` may not carry over into subsequent sessions. The safest pattern is to supply the token on the **same line** as each device command:
+
 ```bash
-android run --apks=my-app.apk
-android emulator list
-# adb commands also work under the same token:
-adb shell dumpsys battery
+# Linux/macOS — prefix inline
+ARBITER_LEASE_TOKEN=token-uuid-1234 android run --apks=my-app.apk
+ARBITER_LEASE_TOKEN=token-uuid-1234 adb shell dumpsys battery
 ```
+
+```powershell
+# Windows PowerShell — set and run in one statement
+$env:ARBITER_LEASE_TOKEN='token-uuid-1234'; android run --apks=my-app.apk
+$env:ARBITER_LEASE_TOKEN='token-uuid-1234'; adb shell dumpsys battery
+```
+
+```cmd
+:: Windows Command Prompt — chain with &&
+set ARBITER_LEASE_TOKEN=token-uuid-1234 && android run --apks=my-app.apk
+```
+
+> [!TIP]
+> **Human / interactive testing:** If you are running commands manually in a single terminal session, the classic `export` (or `$env:` / `SET`) once is perfectly fine — your shell will retain the variable for the duration of the session. The inline pattern above is specifically needed for coding agents, which often spawn a fresh subprocess per command.
 
 **3. Release the Lease**
 ```bash
@@ -224,8 +239,9 @@ arbiter lease status --resource android
    ```bash
    export PATH=/tmp/arbiter_shims:$PATH
    arbiter request android --wait --duration 30
-   export ARBITER_LEASE_TOKEN=<token-from-output>
-   android run --apks=app1.apk
+   # Note the printed token, e.g.: export ARBITER_LEASE_TOKEN=<token-from-output>
+   # Pass it inline with every device command (agents often spawn isolated sessions):
+   ARBITER_LEASE_TOKEN=<token-from-output> android run --apks=app1.apk
    # Do NOT release yet.
    ```
 4. **Agent B (Terminal 3)**:
@@ -239,7 +255,9 @@ arbiter lease status --resource android
 
    # This command blocks because Agent A still holds the lease!
    arbiter request android --wait
-   # (Blocks and waits...)
+   # (Blocks and waits until Agent A releases...)
+   # Once granted, pass the new token inline:
+   ARBITER_LEASE_TOKEN=<agent-b-token> android run --apks=app2.apk
    ```
 5. **Release Lease (Terminal 2)**: `arbiter release`
 6. **Agent B Unblocks**: Terminal 3 will now automatically proceed with its lease grant once the resource is freed. Agent B can then run its command.

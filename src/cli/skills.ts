@@ -52,22 +52,24 @@ arbiter request <resource_name> --wait
 # Example for Tizen:   arbiter request sdb --wait
 \`\`\`
 
-## 4. Exporting the Token
-The \`arbiter request\` command outputs an export command with your lease token. Run that command in your current shell session before retrying the device command — the token must be in the environment or Arbiter will block the command again.
+## 4. Providing the Token to Commands
+The \`arbiter request\` command outputs your lease token. Because coding agents often spawn a new, isolated shell session for each command, **exporting the token once may not persist** to subsequent commands. The most reliable approach is to provide the token in the same line for *every* device command you run:
 
 **Linux/macOS:**
 \`\`\`bash
-export ARBITER_LEASE_TOKEN=eyJhbGci...
+ARBITER_LEASE_TOKEN=eyJhbGci... adb logcat
+# Or chain it:
+export ARBITER_LEASE_TOKEN=eyJhbGci... && adb logcat
 \`\`\`
 
 **Windows (PowerShell):**
 \`\`\`powershell
-$env:ARBITER_LEASE_TOKEN="eyJhbGci..."
+$env:ARBITER_LEASE_TOKEN="eyJhbGci..."; adb logcat
 \`\`\`
 
 **Windows (Command Prompt):**
 \`\`\`cmd
-set ARBITER_LEASE_TOKEN=eyJhbGci...
+set ARBITER_LEASE_TOKEN=eyJhbGci... && adb logcat
 \`\`\`
 
 ## 5. Releasing the Lease
