@@ -1,6 +1,6 @@
 <div align="center">
   <h1>Arbiter (Alpha)</h1>
-  <p><b>Agentic Resource Broker & Interceptor for Test Engineering Run-times</b></p>
+  <p><b>Agentic Resource Broker &amp; Interceptor for Test Engineering Run-times</b></p>
   <p>A lightweight lease broker and shim system designed to help coordinate access for coding agents. It aims to reduce collisions when autonomous agents (like Claude Code, Codex, or OpenCode) target limited external hardware bridges like Android Emulators, bare-metal IoT boards, and native displays.</p>
 </div>
 
@@ -22,11 +22,12 @@ sudo apt-get install -y nodejs
 
 ---
 
-## ⚡ Quick Start
+## ⚡ Setup
 
 As autonomous coding agents automate development and testing tasks, they may encounter issues when trying to access the same localized system resource simultaneously. **Arbiter** provides a central authority to coordinate these requests.
 
-### 1. Installation 
+### Step 1 — Install & Start the Broker
+
 ```bash
 npm install -g @nochoco-lee/arbiter
 
@@ -34,84 +35,66 @@ npm install -g @nochoco-lee/arbiter
 arbiter start
 ```
 
-### 2. Install the Shim Interceptor
-Arbiter can install a small CLI replacement (Shim) for common commands that pauses execution until a valid lease is held. 
+### Step 2 — Install the Shims (`android` + `adb`)
 
-#### Recommended for Android: The `android` CLI
-The cleanest way to support Android agents is to shim the `android` CLI. Because the `android` binary is located consistently in your `$PATH` and handles SDK paths internally, it avoids bypassing issues caused by hardcoded absolute paths.
+Arbiter replaces device CLI commands with shims that enforce lease ownership before executing. For Android, install **both** shims — they are complementary, not alternatives:
 
-**Windows Installation:**
-1. Open PowerShell as Administrator.
-2. Run the install command (Arbiter will automatically create the folder if it doesn't exist):
-   ```powershell
-   # Example: Installing into C:\Arbiter\bin
-   arbiter shim install C:\Arbiter\bin android
-   ```
-3. Follow the **Agent Execution Environments** section below to use it.
+- **`android`** — high-level commands: `android run`, `android emulator`, build tooling.
+- **`adb`** — low-level device access: `adb shell`, `adb logcat`, file push/pull, etc.
 
-**macOS/Linux Installation:**
+Both shims share the **same device lease slot** — one token covers both tools.
+
+**macOS/Linux:**
 ```bash
 arbiter shim install ~/.arbiter/bin android
-```
-
-#### Agent Skill Integration (Recommended)
-Arbiter provides a built-in skill that teaches coding agents how to interact with device resources cooperatively. It instructs them on handling leases, exporting tokens, and avoiding absolute paths.
-
-Run the following command in your project's root directory:
-```bash
-arbiter skills install arbiter
-```
-This generates a context file at `.agents/skills/arbiter/SKILL.md`. This is a project-level configuration and should be initialized in each workspace where coding agents operate.
-
-#### ADB Integration
-If your agents invoke `adb` directly (e.g. in legacy workflows or Gradle builds), you can also shim `adb`.
-
-```bash
-# Example: Install the ADB interceptor
 arbiter shim install ~/.arbiter/bin adb
 ```
 
-> [!IMPORTANT]
-> **ADB Absolute Path Bypass:** In many Android projects, coding agents attempt to resolve the absolute SDK path to `adb` (e.g. via `local.properties`), which bypasses standard `$PATH` shims completely.
-> 
-> **To mitigate this:**
-> 1. **Use the Agent Skill:** The `arbiter skills install arbiter` command (described above) explicitly instructs agents to never use absolute paths. This is crucial on Windows where binary hijacking is not supported.
-> 2. **Android SDK Hijacking (macOS/Linux):** When you run the shim install command on macOS/Linux, Arbiter will offer to proactively **hijack** your real SDK binary (renaming it to `adb.real` and replacing it with a smart router). This guarantees interception even if agents use the absolute path.
-
-> [!NOTE]
-> **`adb` and `android` share a device lease.** Acquiring a lease with `arbiter request adb` and acquiring one with `arbiter request android` compete for the **same underlying slot**. A token obtained for either tool is valid for both. This prevents two agents from colliding via different CLI front-ends on the same physical device.
-
-> [!TIP]
-> If Arbiter cannot auto-discover the target binary in your PATH during installation, it will interactively prompt you to provide its absolute path. For `adb`, a platform-specific example path is shown to help (e.g. `C:\Users\<user>\AppData\Local\Android\Sdk\platform-tools\adb.exe` on Windows).
-
-#### Uninstallation
-To remove a shim and automatically revert any hijacked binaries, use the uninstall command:
-
-```bash
-arbiter shim uninstall ~/.arbiter/bin android
-arbiter shim uninstall ~/.arbiter/bin adb
+**Windows (PowerShell as Administrator):**
+```powershell
+# Arbiter will create the folder automatically if it doesn't exist
+arbiter shim install C:\Arbiter\bin android
+arbiter shim install C:\Arbiter\bin adb
 ```
 
-### 3. Agent Execution Environments (PATH Separation)
+> [!IMPORTANT]
+> **ADB Absolute Path Bypass:** Many Android projects and Gradle builds resolve `adb` to its absolute SDK path (e.g. via `local.properties`), which bypasses `$PATH` shims completely.
+>
+> **Mitigations:**
+> 1. **Agent Skill (Step 3 below):** Explicitly instructs agents never to use absolute paths. Essential on Windows.
+> 2. **SDK Hijacking (macOS/Linux only):** When installing the `adb` shim on macOS/Linux, Arbiter will offer to rename the real binary to `adb.real` and replace it with a smart router — guaranteeing interception even when agents use the absolute path.
 
-To allow agents to use the shims while humans use tools natively, we recommend using **PATH separation**. Prepend the shim directory inside a launcher script tailored for agents.
+> [!TIP]
+> If Arbiter cannot auto-discover the target binary in your `PATH` during installation, it will prompt you for the absolute path. For `adb`, a platform-specific example is shown (e.g. `C:\Users\<user>\AppData\Local\Android\Sdk\platform-tools\adb.exe` on Windows).
+
+### Step 3 — Install the Agent Skill
+
+Arbiter provides a built-in skill file that teaches coding agents how to interact with device resources cooperatively: when to request a lease, how to pass the token, and why absolute paths must be avoided.
+
+Run this command in your **project's root directory**:
+
+```bash
+arbiter skills install arbiter
+```
+
+This generates `.agents/skills/arbiter/SKILL.md` — a project-level context file that most coding agent frameworks pick up automatically. Repeat this in each workspace where agents operate.
+
+### Step 4 — Launch Your Agent with PATH Separation
+
+To allow agents to use the shims while humans continue using the real tools, prepend the shim directory inside a launcher script and set `ARBITER_AGENT_SESSION=1` to enable smart routing.
 
 > [!WARNING]
-> We recommend NOT adding these Arbiter shim directories to your global system or user PATH to avoid unexpected interception in your manual terminal sessions.
+> Do **not** add the Arbiter shim directory to your global system or user `PATH`. This would intercept your own manual terminal commands.
 
-**Linux/macOS `agent_start.sh`:**
+**Linux/macOS — `agent_start.sh`:**
 ```bash
-# Prepend the shim directory to restrict the agent
 export PATH=~/.arbiter/bin:$PATH
-# Enable hijacking interception for this session
 export ARBITER_AGENT_SESSION=1
-# The agent will now use the Arbiter shim instead of the real binary
-claude # Start the agent
+claude  # or: codex, opencode, etc.
 ```
 
 **Windows PowerShell:**
 ```powershell
-# Prepend the shim directory for this session
 $env:Path = "C:\Arbiter\bin;" + $env:Path
 $env:ARBITER_AGENT_SESSION = "1"
 claude
@@ -119,20 +102,34 @@ claude
 
 **Windows Command Prompt:**
 ```cmd
-@REM Prepend the shim directory for this session
 set PATH=C:\Arbiter\bin;%PATH%
 set ARBITER_AGENT_SESSION=1
 claude
 ```
 
+### Uninstallation
+
+To remove a shim and automatically revert any hijacked binaries:
+
+```bash
+# macOS/Linux
+arbiter shim uninstall ~/.arbiter/bin android
+arbiter shim uninstall ~/.arbiter/bin adb
+
+# Windows (PowerShell as Administrator)
+arbiter shim uninstall C:\Arbiter\bin android
+arbiter shim uninstall C:\Arbiter\bin adb
+```
+
 ---
 
-## 🤖 Agent Workflow
+## 🤖 How Agents Use Arbiter
 
-This is what a coding agent will typically see and do. Arbiter is designed to be "hint-driven"—if an agent tries to use a resource without a lease, Arbiter will provide instructions on how to get one.
+Arbiter is **hint-driven** — if an agent runs a device command without a lease, the shim intercepts it and prints exactly what to do next.
 
 ### Automatic Interception (The "Oops" Path)
-If an agent runs `android run` without a lease, the Shim will intercept it:
+
+If an agent runs `android run` without a lease, the shim outputs:
 ```text
 [14:30:01.123] [ARBITER SHIM] State: no ARBITER_LEASE_TOKEN is set for this session.
 [14:30:01.124] [ARBITER SHIM] Next: request a lease before running 'android'.
@@ -140,47 +137,34 @@ If an agent runs `android run` without a lease, the Shim will intercept it:
 [14:30:01.126] [ARBITER SHIM] Note: a token for 'adb' also covers 'android' — they share a device lease.
 ```
 
-### Standard Lease Cycle
-Agents should follow this pattern for reliable execution:
+### Lease Cycle
 
 **1. Request a Lease**
 
 ```bash
-# Linux/macOS
 arbiter request android --wait
-# Output: [ARBITER] Granted Access to: android
-# Output: export ARBITER_LEASE_TOKEN=token-uuid-1234   <-- copy this token
-```
-
-```powershell
-# Windows PowerShell
-arbiter request android --wait
-# Arbiter outputs multiple formats — note the token value printed
-```
-
-```cmd
-:: Windows Command Prompt
-arbiter request android --wait
-:: Note the token value printed
+# Output includes the lease token, e.g.:
+# export ARBITER_LEASE_TOKEN=token-uuid-1234   <-- note this value
 ```
 
 > [!NOTE]
-> `arbiter request adb --wait` works identically — `adb` and `android` share the same device lease slot. The token returned is valid for both `adb` and `android` shims.
+> `arbiter request adb --wait` is identical — `adb` and `android` share the same lease slot. The token is valid for both shims.
 
-**2. Execute Commands (pass the token inline)**
+**2. Run Device Commands (pass the token inline)**
 
-Coding agents commonly spawn a **new, isolated shell session** for every command they run. A one-time `export` may not carry over into subsequent sessions. The safest pattern is to supply the token on the **same line** as each device command:
+Coding agents frequently spawn a **new, isolated shell session** for each command they run, so a one-time `export` may not carry over. The safest pattern is to provide the token on the **same line** as each device command:
 
 ```bash
-# Linux/macOS — prefix inline
+# Linux/macOS — inline prefix
 ARBITER_LEASE_TOKEN=token-uuid-1234 android run --apks=my-app.apk
 ARBITER_LEASE_TOKEN=token-uuid-1234 adb shell dumpsys battery
+ARBITER_LEASE_TOKEN=token-uuid-1234 adb logcat -d
 ```
 
 ```powershell
 # Windows PowerShell — set and run in one statement
 $env:ARBITER_LEASE_TOKEN='token-uuid-1234'; android run --apks=my-app.apk
-$env:ARBITER_LEASE_TOKEN='token-uuid-1234'; adb shell dumpsys battery
+$env:ARBITER_LEASE_TOKEN='token-uuid-1234'; adb logcat -d
 ```
 
 ```cmd
@@ -189,7 +173,7 @@ set ARBITER_LEASE_TOKEN=token-uuid-1234 && android run --apks=my-app.apk
 ```
 
 > [!TIP]
-> **Human / interactive testing:** If you are running commands manually in a single terminal session, the classic `export` (or `$env:` / `SET`) once is perfectly fine — your shell will retain the variable for the duration of the session. The inline pattern above is specifically needed for coding agents, which often spawn a fresh subprocess per command.
+> **Human / interactive testing:** If you are running commands manually in a single terminal session, a one-time `export ARBITER_LEASE_TOKEN=...` (or `$env:` / `SET`) is perfectly fine — your shell retains the variable for the full session. The inline pattern is specifically needed for coding agents.
 
 **3. Release the Lease**
 ```bash
@@ -234,33 +218,32 @@ arbiter lease status --resource android
 ## 🎭 Scenario: 1 Emulator, 2 Agents
 
 1. **Start the Broker**: `arbiter start` (Keep this running in terminal 1)
-2. **Install the Shim**: `arbiter shim install /tmp/arbiter_shims android`
-3. **Agent A (Terminal 2)**: 
+2. **Install the Shims**: `arbiter shim install /tmp/arbiter_shims android && arbiter shim install /tmp/arbiter_shims adb`
+3. **Agent A (Terminal 2)**:
    ```bash
    export PATH=/tmp/arbiter_shims:$PATH
    arbiter request android --wait --duration 30
-   # Note the printed token, e.g.: export ARBITER_LEASE_TOKEN=<token-from-output>
-   # Pass it inline with every device command (agents often spawn isolated sessions):
+   # Note the printed token, e.g.: ARBITER_LEASE_TOKEN=<token-from-output>
+   # Pass it inline with every device command (agents spawn isolated sessions):
    ARBITER_LEASE_TOKEN=<token-from-output> android run --apks=app1.apk
+   ARBITER_LEASE_TOKEN=<token-from-output> adb logcat -d
    # Do NOT release yet.
    ```
 4. **Agent B (Terminal 3)**:
    ```bash
    export PATH=/tmp/arbiter_shims:$PATH
-   # This is intercepted because Agent B has no lease token yet
+   # Intercepted — Agent B has no lease token
    android run --apks=app2.apk
-   # Output: [ARBITER SHIM] State: no ARBITER_LEASE_TOKEN...
-   # Output: [ARBITER SHIM] Command: arbiter request android --wait
-   # Output: [ARBITER SHIM] Note: a token for 'adb' also covers 'android' — they share a device lease.
+   # [ARBITER SHIM] State: no ARBITER_LEASE_TOKEN...
+   # [ARBITER SHIM] Command: arbiter request android --wait
 
-   # This command blocks because Agent A still holds the lease!
+   # Blocks until Agent A releases:
    arbiter request android --wait
-   # (Blocks and waits until Agent A releases...)
-   # Once granted, pass the new token inline:
+   # Once granted, run inline:
    ARBITER_LEASE_TOKEN=<agent-b-token> android run --apks=app2.apk
    ```
 5. **Release Lease (Terminal 2)**: `arbiter release`
-6. **Agent B Unblocks**: Terminal 3 will now automatically proceed with its lease grant once the resource is freed. Agent B can then run its command.
+6. **Agent B Unblocks**: Receives the lease and proceeds automatically.
 
 ---
 
