@@ -24,6 +24,12 @@ const stateSnapshots: Record<string, {
     command_history: { timestamp: string, command: string, token: string }[] 
 }> = {};
 
+// Resource alias groups: tools that share the same physical device share one lease slot.
+// The user-facing resource name is preserved in logs; only the internal scheduling key is normalized.
+const RESOURCE_ALIASES: Record<string, string> = {
+    'adb':     'android',  // adb and android-cli address the same device
+};
+
 function getAverageDuration(resource: string, command: string): number | null {
     if (!durationHistory[resource] || !durationHistory[resource][command]) return null;
     const history = durationHistory[resource][command];
@@ -194,8 +200,9 @@ export const startBroker = () => {
                 return;
             }
 
-            const resource = urlObj.searchParams.get('resource');
-            if (resource) {
+            const rawResource = urlObj.searchParams.get('resource');
+            if (rawResource) {
+                const resource = RESOURCE_ALIASES[rawResource] ?? rawResource;
                 const leaseData = leaseManager.getActiveLeaseToken(resource); // we'll use internally known remaining time soon
                 
                 const response: any = {
@@ -253,11 +260,6 @@ export const startBroker = () => {
                 return res.end(JSON.stringify({ error: 'missing_resource' }));
             }
 
-            // Resource alias groups: tools that share the same physical device share one lease slot.
-            // The user-facing resource name is preserved; only the internal scheduling key is normalized.
-            const RESOURCE_ALIASES: Record<string, string> = {
-                'adb':     'android',  // adb and android-cli address the same device
-            };
             const originalResource = body.resource;
             body.resource = RESOURCE_ALIASES[body.resource] ?? body.resource;
             if (body.resource !== originalResource) {
@@ -362,10 +364,11 @@ export const startBroker = () => {
 
         if (req.method === 'POST' && path === '/api/permit/request') {
             const body = await readJsonBody<{resource: string, commands: string}>(req);
-            log(`[Broker] Permit Request: resource=${body.resource}, commands=${body.commands}`);
-            const { permit, error } = leaseManager.requestPermit(body.resource, body.commands);
+            const actualResource = RESOURCE_ALIASES[body.resource] ?? body.resource;
+            log(`[Broker] Permit Request: resource=${actualResource} (requested: ${body.resource}), commands=${body.commands}`);
+            const { permit, error } = leaseManager.requestPermit(actualResource, body.commands);
             if (!permit) {
-                warn(`[Broker] Permit Denied: resource=${body.resource} reason=${error}`);
+                warn(`[Broker] Permit Denied: resource=${actualResource} reason=${error}`);
                 return res.writeHead(403).end(JSON.stringify({ error: error || 'resource_not_leased' }));
             }
             log(`[Broker] Permit Created: id=${permit.id}, status=${permit.status}`);
@@ -442,9 +445,10 @@ export const startBroker = () => {
         }
 
         if (req.method === 'GET' && path === '/api/permit/status') {
-             const rc = urlObj.searchParams.get('resource');
+             const rawRc = urlObj.searchParams.get('resource');
              const pid = urlObj.searchParams.get('id');
-             if (!rc || !pid) return res.writeHead(400).end();
+             if (!rawRc || !pid) return res.writeHead(400).end();
+             const rc = RESOURCE_ALIASES[rawRc] ?? rawRc;
              const permits = leaseManager.getPermitsForResource(rc);
              if (!permits || !permits[pid]) return res.writeHead(404).end();
              res.writeHead(200);

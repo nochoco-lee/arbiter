@@ -605,11 +605,19 @@ async function main() {
                   return;
               }
              
-             const makeReq = (conflict_accepted = false) => {
+             const makeReq = async (conflict_accepted = false) => {
                  let progressIv: NodeJS.Timeout | undefined;
                  
                  // Experimental Scheduling: Progress Reporting
                  if (autoWait && !asyncMode) {
+                     const initialStatus = await checkResourceStatus(resource);
+                     if (initialStatus && initialStatus.state && initialStatus.state !== 'FREE' && initialStatus.state !== 'AVAILABLE') {
+                         let msg = `${getTimestamp()} [ARBITER] waiting: state=${initialStatus.state} queue=${initialStatus.queueDepth}`;
+                         if (initialStatus.holderAgeSeconds !== undefined) msg += ` holder_age=${initialStatus.holderAgeSeconds}s`;
+                         if (initialStatus.drainingActivePermitCount > 0) msg += ` draining=${initialStatus.drainingActivePermitCount}`;
+                         process.stderr.write(msg + "\n");
+                     }
+
                      progressIv = setInterval(async () => {
                          const status = await checkResourceStatus(resource);
                          if (status && status.state) {
