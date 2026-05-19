@@ -851,32 +851,47 @@ async function main() {
 
         // --- DISCOVERY LOGIC ---
         let discoveredPath = '';
+        let candidatePaths: string[] = [];
+
+        if (shimName === 'adb') {
+            const home = require('os').homedir();
+            if (process.platform === 'win32') {
+                candidatePaths.push(path.join(home, 'AppData', 'Local', 'Android', 'Sdk', 'platform-tools', 'adb.exe'));
+            } else if (process.platform === 'darwin') {
+                candidatePaths.push(path.join(home, 'Library', 'Android', 'sdk', 'platform-tools', 'adb'));
+            } else {
+                candidatePaths.push(path.join(home, 'Android', 'Sdk', 'platform-tools', 'adb'));
+            }
+        }
+
         try {
             const lookCmd = process.platform === 'win32' ? 'where' : 'which';
             const lookRes = spawnSync(lookCmd, ['-a', shimName], { encoding: 'utf8' }); // -a to find ALL occurrences
             if (lookRes.status === 0) {
                 const paths = lookRes.stdout.split(/\r?\n/).filter(p => p.trim() !== '');
-                
-                for (const p of paths) {
-                    // Skip if it's the directory we are currently installing into
-                    if (p.includes(targetDir)) continue;
-
-                    try {
-                        const content = fs.readFileSync(p, { encoding: 'utf8', flag: 'r' });
-                        // Check for Arbiter Fingerprint: "ARBITER SHIM" or "node ... index.js"
-                        if (content.includes('[ARBITER SHIM]') || content.includes('dist/shim/index.js') || content.includes('ARBITER_REAL_') || content.includes('ARBITER_AGENT_SESSION')) {
-                            continue; // This is another shim, skip it
-                        }
-                        discoveredPath = p;
-                        break; // Found a real one!
-                    } catch (e) {
-                        // If we can't read it (e.g. it's a binary), it's likely the REAL one!
-                        discoveredPath = p;
-                        break;
-                    }
-                }
+                candidatePaths.push(...paths);
             }
         } catch (e) {}
+
+        for (const p of candidatePaths) {
+            if (!fs.existsSync(p)) continue;
+            // Skip if it's the directory we are currently installing into
+            if (p.includes(targetDir)) continue;
+
+            try {
+                const content = fs.readFileSync(p, { encoding: 'utf8', flag: 'r' });
+                // Check for Arbiter Fingerprint: "ARBITER SHIM" or "node ... index.js"
+                if (content.includes('[ARBITER SHIM]') || content.includes('dist/shim/index.js') || content.includes('ARBITER_REAL_') || content.includes('ARBITER_AGENT_SESSION')) {
+                    continue; // This is another shim, skip it
+                }
+                discoveredPath = p;
+                break; // Found a real one!
+            } catch (e) {
+                // If we can't read it (e.g. it's a binary), it's likely the REAL one!
+                discoveredPath = p;
+                break;
+            }
+        }
 
         if (!discoveredPath) {
             console.warn(`\n[ARBITER] Warning: Could not auto-discover the real '${shimName}' binary in your PATH.`);
