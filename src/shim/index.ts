@@ -55,9 +55,9 @@ function getHardTimeoutOverrides(caller: string, args: string[]): number {
     return 60; // default 60s hard timeout
 }
 
-async function checkLease(token: string): Promise<{valid: boolean, expires_at?: number, queueDepth?: number, error?: string, status?: number}> {
+async function checkLease(token: string, reactivate: boolean = true): Promise<{valid: boolean, expires_at?: number, queueDepth?: number, error?: string, status?: number}> {
     return new Promise((resolve) => {
-        const req = http.request(`${BROKER_URL}/status`, {
+        const req = http.request(`${BROKER_URL}/status?reactivate=${reactivate}`, {
             method: 'GET',
             headers: { 'Authorization': `Bearer ${token}` }
         }, (res: http.IncomingMessage) => {
@@ -313,7 +313,8 @@ async function main() {
 
     let meta: any = { valid: true };
     if (token) {
-        meta = await checkLease(token);
+        const shouldReactivate = !isTokenExempt;
+        meta = await checkLease(token, shouldReactivate);
         if (!meta.valid && !isTokenExempt) {
             if (meta.error && meta.error.includes('ECONNREFUSED')) {
                 process.stderr.write(`${getTimestamp()} [ARBITER] Could not connect to broker at ${BROKER_URL}. Is 'arbiter start' running?\n`);

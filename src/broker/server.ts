@@ -145,7 +145,8 @@ export const startBroker = () => {
             if (authHeader && authHeader.startsWith('Bearer ')) {
                 // Shim Validation check
                 const token = authHeader.substring(7);
-                const isValid = leaseManager.validateToken(token);
+                const reactivate = urlObj.searchParams.get('reactivate') !== 'false';
+                const isValid = leaseManager.validateToken(token, reactivate);
                 if (isValid) {
                     const resource = leaseManager.getResourceByToken(token);
                     const depth = queueManager.getQueueDepth(resource || '');

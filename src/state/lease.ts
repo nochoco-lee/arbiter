@@ -123,7 +123,7 @@ export class LeaseManager {
     return false;
   }
 
-  public validateToken(token: string): boolean {
+  public validateToken(token: string, reactivate: boolean = true): boolean {
     for (const [_, lease] of this.activeLeases.entries()) {
       // Allow execution to bridge if its still GRANTED. 
       if (lease.token === token) {
@@ -131,10 +131,12 @@ export class LeaseManager {
         
         // If AVAILABLE, move back to GRANTED (Reactive Resume)
         if (lease.state === 'AVAILABLE') {
-            lease.state = 'GRANTED';
-            this.resourceStates.set(lease.resource, 'GRANTED');
-            lease.last_heartbeat = Date.now();
-            log(`[Arbiter] Lease ${lease.token} reactivated from AVAILABLE state.`);
+            if (reactivate) {
+                lease.state = 'GRANTED';
+                this.resourceStates.set(lease.resource, 'GRANTED');
+                lease.last_heartbeat = Date.now();
+                log(`[Arbiter] Lease ${lease.token} reactivated from AVAILABLE state.`);
+            }
             return true;
         }
 
