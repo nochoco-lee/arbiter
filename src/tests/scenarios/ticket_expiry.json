@@ -4,7 +4,8 @@
   "description": "Tests that a READY ticket automatically expires if the holding agent fails to claim it within the timeout latency, promoting the next blocked agent natively instead.",
   "config": {
     "ARBITER_TICKET_THRESHOLD_WAIT": "60",
-    "ARBITER_ZOMBIE_LIMIT": "5000"
+    "ARBITER_ZOMBIE_LIMIT": "5000",
+    "ARBITER_TICKET_CLAIM_WINDOW": "10"
   },
   "steps": [
     {
@@ -45,8 +46,8 @@
     {
       "action": "wait_broker_state",
       "expectedState": "GRANTED",
-      "timeoutMs": 60000,
-      "comment": "6-7. Simulate Agent B crashing. Wait up to 60s for the broker to organically expire B's ticket and promote Agent C."
+      "timeoutMs": 25000,
+      "comment": "6-7. Simulate Agent B crashing. Wait up to 25s for the broker to organically expire B's ticket (10s claim window + watchdog interval) and promote Agent C."
     }
   ]
 }

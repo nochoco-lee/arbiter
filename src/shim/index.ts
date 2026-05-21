@@ -185,6 +185,7 @@ ENVIRONMENT:
   [Broker / Server Settings]
   ARBITER_TICKET_THRESHOLD_WAIT   Wait time (secs) before auto-shifting to ASYNC (Default: 180).
   ARBITER_TICKET_THRESHOLD_DEPTH  Queue depth before auto-shifting to ASYNC (Default: 3).
+  ARBITER_TICKET_CLAIM_WINDOW     Time (secs) an ASYNC ticket stays READY before expiring (Default: 45).
   ARBITER_ZOMBIE_LIMIT            Inactivity limit (ms) before force-releasing (Default: 600000).
   ARBITER_CONTEXT_DIR             Directory where session artifacts are saved (Default: cwd).
 

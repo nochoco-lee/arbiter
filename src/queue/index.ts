@@ -195,7 +195,8 @@ class QueueEngine {
               if (head.status === 'WAITING') {
                   head.status = 'READY';
                   head.ready_at = Date.now();
-                  head.claim_deadline = Date.now() + 45000; // 45s claim window
+                  const claimWindowMs = parseInt(process.env.ARBITER_TICKET_CLAIM_WINDOW || '45') * 1000;
+                  head.claim_deadline = Date.now() + claimWindowMs;
                   log(`[Queue] Entry READY for claim: id=${head.id}, resource=${resource}, deadline=${new Date(head.claim_deadline).toISOString()}`);
                   return; // Stop here, wait for claim or timeout
               }

@@ -44,7 +44,7 @@ export function delay(ms: number) {
 // and accepting connections — no TCP polling, no races.
 export function waitForBrokerReady(
     proc: ChildProcess,
-    timeoutMs: number = 20000
+    timeoutMs: number = 30000
 ): Promise<number> {
     return new Promise((resolve, reject) => {
         let buf = '';
