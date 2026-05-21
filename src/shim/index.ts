@@ -175,8 +175,8 @@ COMMANDS:
 
   skills install <name>          Install an agent skill that guides coding agents on how to use 
                                  Arbiter for coordinated resource access.
-                                 (Currently only 'adb' is supported; installs with 'arbiter-' prefix)
-                                 Example: arbiter skills install adb
+                                 (Currently only 'arbiter' is supported)
+                                 Example: arbiter skills install arbiter
 
 ENVIRONMENT:
   ARBITER_LEASE_TOKEN    Active lease token required for resource access.
@@ -194,6 +194,33 @@ ENVIRONMENT:
   ARBITER_AUTH_SECRET             Shared secret required when connecting to a remote broker.
   ARBITER_REAL_<CMD>_PATH         Hard-override path to the real binary (e.g. ARBITER_REAL_ADB_PATH).
 `);
+
+    if (process.platform === 'win32') {
+        console.log(`
+HOW TO RUN CODING AGENTS:
+  To allow autonomous coding agents to automatically acquire and use resource leases,
+  they must be launched in an environment where the Arbiter shim is in the PATH.
+
+  Windows PowerShell:
+    $env:Path = "C:\\Arbiter\\bin;" + $env:Path
+    $env:ARBITER_AGENT_SESSION = "1"
+    claude
+
+  Windows Command Prompt:
+    set PATH=C:\\Arbiter\\bin;%PATH%
+    set ARBITER_AGENT_SESSION=1
+    claude`);
+    } else {
+        console.log(`
+HOW TO RUN CODING AGENTS:
+  To allow autonomous coding agents to automatically acquire and use resource leases,
+  they must be launched in an environment where the Arbiter shim is in the PATH.
+
+  Linux / macOS:
+    export PATH=~/.arbiter/bin:$PATH
+    export ARBITER_AGENT_SESSION=1
+    claude`);
+    }
 }
 
 // --- Remote Broker Execution via WebSocket ---

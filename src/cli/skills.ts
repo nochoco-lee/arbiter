@@ -9,7 +9,7 @@ export function handleSkillsCommand(args: string[]) {
 
     if (args[0] === 'install') {
         const skillName = args[1] || 'arbiter';
-        if (skillName === 'arbiter' || skillName === 'adb') {
+        if (skillName === 'arbiter') {
             installArbiterSkill();
         } else {
             console.error(`[ARBITER] Unknown skill: ${skillName}. Only 'arbiter' is supported currently.`);
