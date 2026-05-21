@@ -566,5 +566,6 @@ export class LeaseManager {
 }
 
 export const leaseManager = new LeaseManager();
-const leaseWatchdog = setInterval(() => leaseManager.runWatchdog().catch(e => warn(`Watchdog error: ${e}`)), 5000);
+const leaseWatchdogInterval = parseInt(process.env.ARBITER_WATCHDOG_INTERVAL || '5000');
+const leaseWatchdog = setInterval(() => leaseManager.runWatchdog().catch(e => warn(`Watchdog error: ${e}`)), leaseWatchdogInterval);
 if (leaseWatchdog.unref) leaseWatchdog.unref();

@@ -308,5 +308,6 @@ class QueueEngine {
 }
 
 export const queueManager = new QueueEngine();
-const queueWatchdog = setInterval(() => queueManager.runWatchdog(), 5000);
+const queueWatchdogInterval = parseInt(process.env.ARBITER_WATCHDOG_INTERVAL || '5000');
+const queueWatchdog = setInterval(() => queueManager.runWatchdog(), queueWatchdogInterval);
 if (queueWatchdog.unref) queueWatchdog.unref();
