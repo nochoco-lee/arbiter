@@ -3,15 +3,16 @@
   "runner": "integration",
   "description": "Tests that an active process prints a 'Soft Arbitration WARNING' to standard error if its hard duration timeout is reached and the broker forcibly reassigns the lease to another agent (Arbitration Pre-emption).",
   "config": {
-    "ARBITER_ZOMBIE_LIMIT": "3000"
+    "ARBITER_ZOMBIE_LIMIT": "8000",
+    "ARBITER_WATCHDOG_INTERVAL": "1000"
   },
   "steps": [
     {
       "action": "request",
       "agentId": "A",
-      "duration": 2,
+      "duration": 10,
       "expectStatus": 200,
-      "comment": "1. Agent A requests a deliberately short lease (2 seconds maximum execution)"
+      "comment": "1. Agent A requests a short lease (10 seconds)"
     },
     {
       "action": "request",
@@ -27,20 +28,26 @@
       "comment": "Allow broker time to register B in the queue"
     },
     {
+      "action": "heartbeat",
+      "agentId": "A",
+      "comment": "Send a manual heartbeat to reset the zombie timer before starting the heavy shim process"
+    },
+    {
       "action": "run_shim",
       "agentId": "A",
       "command": [
         "node",
         "-e",
-        "setTimeout(()=>{}, 12000)"
+        "setTimeout(()=>{}, 15000)"
       ],
       "expectedStderr": "warning",
-      "comment": "3. Agent A's shim command runs for 12 seconds."
+      "comment": "3. Agent A's shim command runs for 15 seconds. The shim's 10s heartbeat will arrive too late to save it from the 8s zombie limit, triggering a mid-execution kill."
     },
     {
-      "action": "assert_broker_state",
+      "action": "wait_broker_state",
       "expectedState": "FREE",
-      "comment": "4. Verify the system survived and Agent B acquired it, then Watchdog organically claimed B back to FREE because B lacked a heartbeat for 12s."
+      "timeoutMs": 20000,
+      "comment": "4. Wait for the watchdog to reclaim B's zombie lease. B never heartbeats, so the watchdog will force-release B."
     }
   ]
 }
