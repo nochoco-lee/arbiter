@@ -1,53 +1,19 @@
 <div align="center">
   <h1>Arbiter (Alpha)</h1>
   <p><b>Lease-Based Resource Coordination for Autonomous Coding Agents</b></p>
-  <p>A lightweight lease broker that coordinates access to shared hardware resources between autonomous coding agents.</p>
 </div>
-
-<br>
 
 ---
 
 ## Why Arbiter Exists
-Modern coding agents frequently execute tasks in parallel:
-* autonomous debugging
-* deployment loops
-* test execution
-* log collection
-* device automation
 
-But many hardware bridges and emulators can only be safely controlled by one process at a time.
+Parallel coding agents are fast — but Android emulators, IoT boards, and serial 
+consoles can only be safely controlled by one process at a time. Without coordination, 
+agents overwrite each other's builds, collide on log streams, and produce flaky 
+false-negative failures.
 
-Without coordination:
-* agents overwrite each other's device sessions
-* concurrent workflows interfere with each other's logging and device state
-* deployments race each other
-* flaky false-negative failures appear
-
-Arbiter adds a lightweight lease layer on top of existing CLI tooling to coordinate access between agents.
-
-> [!NOTE]
-> While the built-in shims currently focus on Android (`adb`) workflows, the broker itself is resource-agnostic and designed to coordinate any exclusive local resource.
-
----
-
-## Architecture
-Arbiter works by intercepting device CLI commands through lightweight shims.
-The shim checks lease ownership with a local broker daemon before forwarding execution to the real underlying binary.
-
-```text
-Coding Agent
-     │
-     ▼
- Arbiter Shim  ◄────►  Arbiter Broker
-     │                  (leases, queues, ownership)
-     ▼
-Real Device / Emulator
-```
-
-This allows multiple autonomous agents to share hardware safely without modifying the underlying tools themselves.
-
----
+Arbiter adds a lightweight lease layer on top of your existing CLI tooling so agents 
+queue for device access, work exclusively, and hand off cleanly.
 
 ## Quick Start (2 Minutes)
 
@@ -178,7 +144,7 @@ Agents should use shimmed binaries while humans continue using the real system t
 export PATH=~/.arbiter/bin:$PATH
 export ARBITER_AGENT_SESSION=1
 
-claude
+codex (or claude)
 ```
 
 #### Windows PowerShell
@@ -186,7 +152,7 @@ claude
 $env:Path = "C:\Arbiter\bin;" + $env:Path
 $env:ARBITER_AGENT_SESSION = "1"
 
-claude
+codex (or claude)
 ```
 
 #### Windows Command Prompt
@@ -194,7 +160,7 @@ claude
 set PATH=C:\Arbiter\bin;%PATH%
 set ARBITER_AGENT_SESSION=1
 
-claude
+codex (or claude)
 ```
 
 ---
@@ -314,6 +280,24 @@ Request the lease:
 arbiter request adb --wait
 ```
 Agent B waits until Agent A releases ownership. Once released, Agent B automatically acquires the lease and continues.
+
+---
+
+## Architecture
+Arbiter works by intercepting device CLI commands through lightweight shims.
+The shim checks lease ownership with a local broker daemon before forwarding execution to the real underlying binary.
+
+```text
+Coding Agent
+     │
+     ▼
+ Arbiter Shim  ◄────►  Arbiter Broker
+     │                  (leases, queues, ownership)
+     ▼
+Real Device / Emulator
+```
+
+This allows multiple autonomous agents to share hardware safely without modifying the underlying tools themselves.
 
 ---
 
