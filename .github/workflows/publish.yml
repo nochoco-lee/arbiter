@@ -18,6 +18,8 @@ jobs:
         with:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
+      - name: Upgrade npm for OIDC Trusted Publishing support
+        run: npm install -g npm@latest
 
       - run: npm ci
       - run: npm run build
