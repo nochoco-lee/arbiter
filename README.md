@@ -15,6 +15,10 @@ false-negative failures.
 Arbiter adds a lightweight lease layer on top of your existing CLI tooling so agents 
 queue for device access, work exclusively, and hand off cleanly.
 
+
+https://github.com/user-attachments/assets/ee4faccf-2818-46db-a5fc-abe14720daae
+
+
 ## Quick Start (2 Minutes)
 
 ### 1. Install and Start the Broker
