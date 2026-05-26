@@ -594,6 +594,11 @@ async function main() {
                     res.on('end', () => {
                         if (res.statusCode === 200) {
                             const out = JSON.parse(d);
+                            // Defence-in-depth: a real lease token is always a UUID, never a q_ ticket ID
+                            if (!out.token || out.token.startsWith('q_') || !out.resource) {
+                                process.stderr.write(`${getTimestamp()} [ARBITER] Internal error: broker returned an invalid lease token. Please retry.\n`);
+                                process.exit(1);
+                            }
                             process.stderr.write(`${getTimestamp()} [ARBITER] Ticket CLAIMED! Granted Access to: ${out.resource}\n`);
                             process.stderr.write(`${getTimestamp()} [ARBITER] Next: export the lease token below, then run the resource command.\n`);
                             if (process.platform === 'win32') {

@@ -414,6 +414,13 @@ export const startBroker = () => {
             const { token, error } = await queueManager.claimTicket(body.ticketId);
             if (token) {
                 const resource = leaseManager.getResourceByToken(token);
+                if (!resource) {
+                    // Token doesn't map to an active lease — defence against leaked ticket IDs
+                    log(`[Broker] Claim returned token ${token.substring(0, 8)}... but it has no active lease. Rejecting as ticket_still_waiting.`);
+                    res.writeHead(400);
+                    res.end(JSON.stringify({ error: 'ticket_still_waiting' }));
+                    return;
+                }
                 res.writeHead(200);
                 res.end(JSON.stringify({ token, resource }));
             } else {

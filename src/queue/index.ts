@@ -13,6 +13,8 @@ interface QueueEntry {
   wait_mode: 'BLOCKING' | 'ASYNC';
   ready_at?: number;
   claim_deadline?: number;
+  claim_pending?: boolean;   // true while a blocking --ticket claim is waiting on this entry
+  async_notified?: boolean;  // true once the watchdog has fired the async shift for this entry
 }
 
 class QueueEngine {
@@ -268,12 +270,18 @@ class QueueEngine {
                   } else if (entry.status === 'WAITING') {
                       log(`[Queue] Ticket Claim received early (WAITING state). Shifting back to BLOCKING mode: id=${ticketId}`);
                       entry.wait_mode = 'BLOCKING'; // Convert back to blocking so pump() natively handles it!
-                      // Replace the original resolve/reject traps to fulfill THIS claim request once pumped
+                      entry.claim_pending = true;   // Prevent watchdog from async-shifting while claim is in flight
+                      const oldResolve = entry.resolve;
+                      const oldReject = entry.reject;
                       entry.resolve = (token: string) => {
+                          entry.claim_pending = false;
                           resolve({ token });
+                          oldResolve(token);
                       };
                       entry.reject = (err: Error) => {
+                          entry.claim_pending = false;
                           resolve({ token: null, error: err.message });
+                          oldReject(err);
                       };
                       return; // Do NOT resolve the promise yet. Wait for pump() to promote it naturally!
                   } else if (entry.status === 'MISSED') {
@@ -298,8 +306,16 @@ class QueueEngine {
           const resourceQueue = this.queue.get(resource) || [];
           for (const entry of resourceQueue) {
               if (entry.wait_mode === 'BLOCKING' && entry.status === 'WAITING' && (Date.now() - entry.waiting_since) > thresholdWaitMs) {
+                  if (entry.claim_pending) {
+                      log(`[Queue] Dynamic Async Shift skipped: Entry ${entry.id} has a blocking claim in flight.`);
+                      continue;
+                  }
+                  if (entry.async_notified) {
+                      continue; // Already shifted once, don't resolve again
+                  }
                   log(`[Queue] Dynamic Async Shift: Entry ${entry.id} waited > ${thresholdWaitMs/1000}s. Converting to ASYNC Ticket.`);
                   entry.wait_mode = 'ASYNC';
+                  entry.async_notified = true;
                   entry.resolve(entry.id); // This resolves the hanging enqueue() promise, returning the ticket ID
               }
           }
