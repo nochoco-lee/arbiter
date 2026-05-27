@@ -196,8 +196,9 @@ export const startBroker = () => {
                     res.writeHead(200);
                     res.end(JSON.stringify(statusResp));
                 } else {
+                    const status = leaseManager.getTokenStatus(token);
                     res.writeHead(401);
-                    res.end(JSON.stringify({ valid: false }));
+                    res.end(JSON.stringify({ valid: false, message: status.message }));
                 }
                 return;
             }
@@ -594,6 +595,7 @@ export const startBroker = () => {
                 return res.end(JSON.stringify({ error: 'unauthorized_token' }));
             }
             
+            leaseManager.touchActivity(body.token);
             const adapter = await leaseManager.getAdapter(resource);
             try {
                 // Execute natively on the host's actual binary mapping

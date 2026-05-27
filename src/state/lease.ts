@@ -1,22 +1,36 @@
 import { randomUUID } from 'crypto';
-import { ResourceState, YieldRequest } from '../api/types';
-import { ContextManager, ArbiterContext } from '../context';
+import { ResourceState, YieldRequest, ArbiterContext } from '../api/types';
+import { ContextManager } from '../context';
 import { getAdapterInstance } from '../adapters/index';
 import { log, warn } from '../broker/logger';
 
 export interface LeaseInfo {
   token: string;
   resource: string;
+  created_at: number;
   expires_at: number;
   hard_deadline: number;
   last_heartbeat: number;
+  last_activity_at: number;
+  has_started: boolean;
   state: 'GRANTED' | 'EXPIRING' | 'EXPIRED' | 'AVAILABLE' | 'DRAINING';
   extended?: boolean;
   requested_duration_ms: number;
 }
 
+export interface DeadLeaseInfo {
+    token: string;
+    resource: string;
+    created_at: number;
+    expired_at: number;
+    last_activity_at: number;
+    has_started: boolean;
+    reason: string;
+}
+
 export class LeaseManager {
   private activeLeases: Map<string, LeaseInfo> = new Map();
+  private deadLeaseHistory: Map<string, DeadLeaseInfo> = new Map();
   private resourceStates: Map<string, ResourceState> = new Map();
   private activeAdapters: Map<string, any> = new Map();
   private pendingPermits: Map<string, Record<string, any>> = new Map(); // Resource -> Record<id, PermitRequestInfo>
@@ -28,13 +42,17 @@ export class LeaseManager {
 
   // --- Testing & State Manipulation APIs ---
   public injectTestState(resource: string, leaseInfo: Partial<LeaseInfo>): void {
+      const now = Date.now();
       if (!this.activeLeases.has(resource)) {
           this.activeLeases.set(resource, {
               token: leaseInfo.token || randomUUID(),
               resource,
-              expires_at: leaseInfo.expires_at || Date.now() + 10000,
-              hard_deadline: leaseInfo.hard_deadline || Date.now() + 15000,
-              last_heartbeat: leaseInfo.last_heartbeat || Date.now(),
+              created_at: leaseInfo.created_at || now - 5000,
+              expires_at: leaseInfo.expires_at || now + 10000,
+              hard_deadline: leaseInfo.hard_deadline || now + 15000,
+              last_heartbeat: leaseInfo.last_heartbeat || now,
+              last_activity_at: leaseInfo.last_activity_at || now,
+              has_started: leaseInfo.has_started || false,
               state: leaseInfo.state || 'GRANTED',
               requested_duration_ms: leaseInfo.requested_duration_ms || 10000
           });
@@ -221,12 +239,16 @@ export class LeaseManager {
 
       log(`[Arbiter] Granting Lease: resource=${resource}, duration=${durationSeconds}s`);
       const token = randomUUID();
+      const now = Date.now();
       this.activeLeases.set(resource, {
           token,
           resource,
-          expires_at: Date.now() + (durationSeconds * 1000),
-          hard_deadline: Date.now() + (durationSeconds * 1000) + 60000,
-          last_heartbeat: Date.now(),
+          created_at: now,
+          expires_at: now + (durationSeconds * 1000),
+          hard_deadline: now + (durationSeconds * 1000) + 60000,
+          last_heartbeat: now,
+          last_activity_at: now,
+          has_started: false,
           state: 'GRANTED',
           requested_duration_ms: durationSeconds * 1000
       });
@@ -253,7 +275,7 @@ export class LeaseManager {
                   schema_version: 1,
                   resource: resource,
                   session_id: lease.token,
-                  duration_seconds: Math.round((Date.now() - (lease.expires_at - lease.requested_duration_ms)) / 1000), 
+                  duration_seconds: Math.round((Date.now() - lease.created_at) / 1000), 
                   outcome: req.reason || 'yielded',
                   artifacts: artifacts
               };
@@ -261,6 +283,22 @@ export class LeaseManager {
               if (req.context) Object.assign(ctx, req.context);
 
               ContextManager.saveContext(ctx);
+
+              // Track in dead lease history
+              this.deadLeaseHistory.set(lease.token, {
+                  token: lease.token,
+                  resource: lease.resource,
+                  created_at: lease.created_at,
+                  expired_at: Date.now(),
+                  last_activity_at: lease.last_activity_at,
+                  has_started: lease.has_started,
+                  reason: req.reason || 'yielded'
+              });
+              // Cap history size
+              if (this.deadLeaseHistory.size > 100) {
+                  const firstKey = this.deadLeaseHistory.keys().next().value;
+                  if (firstKey !== undefined) this.deadLeaseHistory.delete(firstKey);
+              }
 
               // Check if we should drain instead of immediate free
               const permits = this.pendingPermits.get(resource) || {};
@@ -295,6 +333,8 @@ export class LeaseManager {
       for (const [_, lease] of this.activeLeases.entries()) {
           if (lease.token === token) {
               lease.last_heartbeat = Date.now();
+              lease.last_activity_at = Date.now();
+              lease.has_started = true;
               // If it was expiring, resurrect it since we just got a heartbeat and queue is empty
               if (lease.state === 'EXPIRING') {
                   this.resurrectIfPossible(lease);
@@ -303,6 +343,50 @@ export class LeaseManager {
           }
       }
       return false;
+  }
+
+  public touchActivity(token: string): boolean {
+      for (const [_, lease] of this.activeLeases.entries()) {
+          if (lease.token === token) {
+              lease.last_activity_at = Date.now();
+              lease.has_started = true;
+              return true;
+          }
+      }
+      return false;
+  }
+
+  public getTokenStatus(token: string): { valid: boolean, message?: string } {
+      const active = Array.from(this.activeLeases.values()).find(l => l.token === token);
+      if (active) {
+          if (active.expires_at > Date.now() || active.state === 'AVAILABLE') return { valid: true };
+          return { valid: false, message: `Token expired at ${new Date(active.expires_at).toLocaleTimeString()} after ${Math.round((Date.now() - active.created_at) / 60000)} minutes of activity.` };
+      }
+
+      const dead = this.deadLeaseHistory.get(token);
+      if (dead) {
+          const totalDurationMin = Math.round((dead.expired_at - dead.created_at) / 60000);
+          
+          if (dead.reason === 'inactivity_timeout') {
+              const inactivitySec = Math.round((dead.expired_at - dead.last_activity_at) / 1000);
+              const message = !dead.has_started 
+                ? `Token expired at ${new Date(dead.expired_at).toLocaleTimeString()} due to ${inactivitySec} seconds of initial inactivity right after lock acquisition.`
+                : `Token expired at ${new Date(dead.expired_at).toLocaleTimeString()} due to ${inactivitySec} seconds of inactivity after some session activity.`;
+              
+              return { valid: false, message };
+          }
+
+          if (dead.reason === 'zombie_timeout' || dead.reason === 'expired_contention') {
+              return { 
+                  valid: false, 
+                  message: `Token expired at ${new Date(dead.expired_at).toLocaleTimeString()} after ${totalDurationMin} minutes of activity (Reason: ${dead.reason}).` 
+              };
+          }
+
+          return { valid: false, message: `Token expired at ${new Date(dead.expired_at).toLocaleTimeString()} (Reason: ${dead.reason}).` };
+      }
+
+      return { valid: false, message: "Token is invalid or has been purged from history." };
   }
 
   public extendGracePeriod(token: string, extraMs: number = 300000): boolean {
@@ -503,11 +587,19 @@ export class LeaseManager {
       const leases = Array.from(this.activeLeases.entries());
       
       for (const [resource, lease] of leases) {
-          
-          // REMOVED: Contention-Aware Auto-Extension! 
-          // We now respect requested duration strictly until a NEW command/heartbeat arrives.
-
           const queueDepth = this.queueDepthResolver ? this.queueDepthResolver(resource) : 0;
+
+          // 0. Initial Inactivity Timeout (New Feature)
+          // Default to 60s, configurable via ARBITER_INITIAL_INACTIVITY_TIMEOUT
+          // This ONLY applies if the lease has not started any activity yet.
+          if (!lease.has_started) {
+              const initialInactivityTimeout = parseInt(process.env.ARBITER_INITIAL_INACTIVITY_TIMEOUT || '60000');
+              if (now - lease.last_activity_at > initialInactivityTimeout) {
+                  log(`[Watchdog] Lease ${lease.token} on ${resource} reclaimed due to INITIAL inactivity (${Math.round((now - lease.last_activity_at)/1000)}s).`);
+                  await this.yieldLease({ token: lease.token, reason: 'inactivity_timeout' }, false);
+                  continue;
+              }
+          }
 
           // 1. Soft Timeout detection: if we passed expires_at, block new commands!
           if (now > lease.expires_at && lease.state === 'GRANTED') {

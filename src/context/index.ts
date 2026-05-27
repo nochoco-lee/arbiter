@@ -1,20 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-
-export interface ArbiterContext {
-    schema_version: number;
-    resource: string;
-    session_id: string;
-    agent_id?: string;
-    duration_seconds: number;
-    outcome: string;
-    hypothesis?: string;
-    findings?: string;
-    suggested_next?: string;
-    commands_run?: number;
-    last_log_tail?: string;
-    artifacts: string[];
-}
+import { ArbiterContext } from '../api/types';
 
 export class ContextManager {
     static getContextFilePath(resource: string): string {

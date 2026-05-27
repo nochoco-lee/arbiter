@@ -352,6 +352,9 @@ async function main() {
                 const SHIM_ALIASES: Record<string, string> = { 'adb': 'android', 'android': 'adb' };
                 const aliasPeer = SHIM_ALIASES[requestAs];
                 console.error(`${getTimestamp()} [ARBITER SHIM] State: current lease token is invalid or expired.`);
+                if (meta.message) {
+                    console.error(`${getTimestamp()} [ARBITER SHIM] Reason: ${meta.message}`);
+                }
                 console.error(`${getTimestamp()} [ARBITER SHIM] Next: acquire a new lease before running '${caller}'.`);
                 console.error(`${getTimestamp()} [ARBITER SHIM] Choose '--wait' if this resource is needed now, or '--async' if you can keep working elsewhere first.`);
                 if (aliasPeer) {
