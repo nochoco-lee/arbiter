@@ -41,6 +41,7 @@ function getAverageDuration(resource: string, command: string): number | null {
 }
 
 import { ConfigManager } from '../config/index';
+import { ContextManager } from '../context/index';
 import { log, warn, logBuffer, sseClients } from './logger';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -622,7 +623,17 @@ export const startBroker = () => {
             return;
         }
 
-        // --- Log Endpoints ---
+        if (req.method === 'GET' && path === '/api/context') {
+            const resource = urlObj.searchParams.get('resource');
+            if (!resource) {
+                res.writeHead(400);
+                return res.end(JSON.stringify({ error: 'missing_resource' }));
+            }
+            const ctx = ContextManager.loadLastContext(resource);
+            res.writeHead(ctx ? 200 : 404);
+            return res.end(JSON.stringify(ctx || { error: 'no_context_found' }));
+        }
+
         if (req.method === 'GET' && path === '/api/logs') {
             const limitParam = urlObj.searchParams.get('limit');
             const limit = Math.min(parseInt(limitParam || '200', 10), LOG_BUFFER_SIZE);
