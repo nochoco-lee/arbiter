@@ -642,6 +642,15 @@ async function main() {
                   process.stderr.write("Usage: arbiter request <resource> [--duration SECS] [--wait] [--async] [--ticket ID]\n");
                   return;
               }
+
+             if (token && meta.valid && meta.resource) {
+                 const SHIM_ALIASES: Record<string, string> = { 'adb': 'android', 'android': 'adb' };
+                 if (meta.resource === resource || SHIM_ALIASES[meta.resource] === resource || SHIM_ALIASES[resource] === meta.resource) {
+                     process.stderr.write(`${getTimestamp()} [ARBITER] You already hold an active lease for ${resource} (Token: ${token}).\n`);
+                     process.stderr.write(`${getTimestamp()} [ARBITER] If you need more time, use 'arbiter extend', or 'arbiter release' first.\n`);
+                     return;
+                 }
+             }
              
              const makeReq = async (conflict_accepted = false) => {
                  let progressIv: NodeJS.Timeout | undefined;

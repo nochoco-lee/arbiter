@@ -160,7 +160,7 @@ export const startBroker = () => {
                     let installAvg = getAverageDuration(resource || '', 'adb install') || 30; // fallback to 30s
                     let estimates = { 'install': installAvg };
 
-                    const statusResp: any = { valid: true, expires_at: expires, queueDepth: depth, estimates, pending_permits: pending };
+                    const statusResp: any = { valid: true, resource: resource, expires_at: expires, queueDepth: depth, estimates, pending_permits: pending };
                     
                     // Check if it's a permit token specifically
                     const permit = leaseManager.getPermitsForResource(resource || '')?.[token];

@@ -161,7 +161,10 @@ export class LeaseManager {
 
         // If EXPIRING, attempt resurrection if no one is waiting
         if (lease.state === 'EXPIRING') {
-          return this.resurrectIfPossible(lease);
+          if (reactivate) {
+              return this.resurrectIfPossible(lease);
+          }
+          return true;
         }
       }
     }
