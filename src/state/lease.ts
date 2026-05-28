@@ -34,6 +34,7 @@ export class LeaseManager {
   private resourceStates: Map<string, ResourceState> = new Map();
   private activeAdapters: Map<string, any> = new Map();
   private pendingPermits: Map<string, Record<string, any>> = new Map(); // Resource -> Record<id, PermitRequestInfo>
+  private yieldingTokens: Set<string> = new Set();
   // We inject a late-bound queue depth resolver to avoid cyclic dependency imports in state module
   public queueDepthResolver?: (res: string) => number;
   public onResourceFree?: (res: string) => void;
@@ -258,11 +259,15 @@ export class LeaseManager {
   }
 
   public async yieldLease(req: YieldRequest, force: boolean = false): Promise<boolean> {
+      if (this.yieldingTokens.has(req.token)) return false;
+
       for (const [resource, lease] of this.activeLeases.entries()) {
           if (lease.token === req.token) {
-              const artifacts: string[] = [];
+              this.yieldingTokens.add(req.token);
               try {
-                  const adapter = await this.getAdapter(resource);
+                  const artifacts: string[] = [];
+                  try {
+                      const adapter = await this.getAdapter(resource);
                   if (process.env.ARBITER_SKIP_ARTIFACTS !== 'true') {
                       artifacts.push(await adapter.captureLogs());
                       artifacts.push(await adapter.screenshot());
@@ -323,7 +328,10 @@ export class LeaseManager {
                   if (this.onResourceFree) this.onResourceFree(resource);
               }
               
-              return true;
+                  return true;
+              } finally {
+                  this.yieldingTokens.delete(req.token);
+              }
           }
       }
       return false;
