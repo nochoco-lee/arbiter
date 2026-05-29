@@ -1,7 +1,7 @@
 import { Adapter, AdapterConfig } from './types';
-import { spawnSync } from 'child_process';
 import * as path from 'path';
 import * as os from 'os';
+import { boundedExec } from './utils';
 
 export class WindowsAdapter implements Adapter {
     private config!: AdapterConfig;
@@ -10,8 +10,7 @@ export class WindowsAdapter implements Adapter {
 
     async execute(args: string[]): Promise<{ stdout: string; stderr: string; exitCode: number; }> {
         // e.g. run a powershell command
-        const res = spawnSync('powershell.exe', [...args], { encoding: 'utf-8' });
-        return { stdout: res.stdout, stderr: res.stderr, exitCode: res.status ?? 1 };
+        return await boundedExec('powershell.exe', args);
     }
 
     async stream(args: string[], onData: (data: string) => void): Promise<void> {}

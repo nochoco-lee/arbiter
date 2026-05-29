@@ -1,8 +1,9 @@
 import { Adapter, AdapterConfig } from './types';
-import { spawn, spawnSync } from 'child_process';
+import { spawn } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
+import { boundedExec } from './utils';
 
 export class TizenAdapter implements Adapter {
     private config!: AdapterConfig;
@@ -12,18 +13,13 @@ export class TizenAdapter implements Adapter {
         this.config = config;
         
         if (this.config.serial) {
-            spawnSync(this.sdbPath, ['connect', this.config.serial]);
+            await boundedExec(this.sdbPath, ['connect', this.config.serial], { timeoutMs: 15000 });
         }
     }
 
     async execute(args: string[]): Promise<{ stdout: string; stderr: string; exitCode: number; }> {
         const fullArgs = this.config.serial ? ['-s', this.config.serial, ...args] : [...args];
-        const res = spawnSync(this.sdbPath, fullArgs, { encoding: 'utf-8' });
-        return {
-            stdout: res.stdout || '',
-            stderr: res.stderr || '',
-            exitCode: res.status ?? 1
-        };
+        return await boundedExec(this.sdbPath, fullArgs);
     }
 
     async stream(args: string[], onData: (data: string) => void): Promise<void> {
@@ -56,7 +52,7 @@ export class TizenAdapter implements Adapter {
 
     async disconnect(): Promise<void> {
         if (this.config.serial) {
-            spawnSync(this.sdbPath, ['disconnect', this.config.serial]);
+            await boundedExec(this.sdbPath, ['disconnect', this.config.serial], { timeoutMs: 10000 });
         }
     }
 }

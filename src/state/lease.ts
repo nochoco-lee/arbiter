@@ -3,6 +3,7 @@ import { ResourceState, YieldRequest } from '../api/types';
 import { ContextManager, ArbiterContext } from '../context';
 import { getAdapterInstance } from '../adapters/index';
 import { log, warn } from '../broker/logger';
+import { ArbiterConfig } from '../config';
 
 export interface LeaseInfo {
   token: string;
@@ -24,6 +25,7 @@ export class LeaseManager {
   public queueDepthResolver?: (res: string) => number;
   public onResourceFree?: (res: string) => void;
   public ceilingConfig?: Record<string, any>;
+  public globalConfig?: ArbiterConfig;
   public experimentalScheduling: boolean = false;
 
   // --- Testing & State Manipulation APIs ---
@@ -129,8 +131,12 @@ export class LeaseManager {
       if (lease.token === token) {
         if (lease.state === 'GRANTED') return true;
         
-        // If AVAILABLE, move back to GRANTED (Reactive Resume)
+        // If AVAILABLE, move back to GRANTED (Reactive Resume) only if no one is waiting
         if (lease.state === 'AVAILABLE') {
+            const queueDepth = this.queueDepthResolver ? this.queueDepthResolver(lease.resource) : 0;
+            if (queueDepth > 0) {
+                return false; // Cannot reactivate if there is a queue
+            }
             if (reactivate) {
                 lease.state = 'GRANTED';
                 this.resourceStates.set(lease.resource, 'GRANTED');
@@ -203,32 +209,44 @@ export class LeaseManager {
       return Object.values(permits).filter((p: any) => p.executionStatus === 'RUNNING').length;
   }
 
-  public grantLease(resource: string, durationSeconds: number = 300): string {
+  public grantLease(resource: string, durationSeconds?: number): string {
       const state = this.getResourceState(resource);
       if (state === 'GRANTED' || state === 'EXPIRING' || state === 'DRAINING') {
          throw new Error(`Resource ${resource} is already leased`);
       }
       
-      // Cooperative Permit System natively mapping ceiling logic limits
-      if (this.ceilingConfig && this.ceilingConfig[resource] && this.ceilingConfig[resource].max_duration_seconds) {
-          const hardCap = this.ceilingConfig[resource].max_duration_seconds;
-          const original = durationSeconds;
-          durationSeconds = Math.min(durationSeconds, hardCap);
+      const config = this.ceilingConfig?.[resource] || {};
+      let duration: number;
+      
+      // 1. Resolve default duration
+      if (durationSeconds === undefined || durationSeconds === null) {
+          duration = config.default_lease_seconds || this.globalConfig?.default_lease_seconds || 300;
+      } else {
+          duration = durationSeconds;
+      }
+
+      const original = duration;
+
+      // 2. Resolve hard cap (max)
+      const hardCap = config.max_lease_seconds || config.max_duration_seconds || this.globalConfig?.max_lease_seconds || this.globalConfig?.global_ceiling_seconds;
+      
+      if (hardCap) {
+          duration = Math.min(duration, hardCap);
           if (original > hardCap) {
               log(`[Arbiter] Clamped requested duration ${original}s to Configuration Hard-Cap ${hardCap}s for ${resource}`);
           }
       }
 
-      log(`[Arbiter] Granting Lease: resource=${resource}, duration=${durationSeconds}s`);
+      log(`[Arbiter] Granting Lease: resource=${resource}, duration=${duration}s`);
       const token = randomUUID();
       this.activeLeases.set(resource, {
           token,
           resource,
-          expires_at: Date.now() + (durationSeconds * 1000),
-          hard_deadline: Date.now() + (durationSeconds * 1000) + 60000,
+          expires_at: Date.now() + (duration * 1000),
+          hard_deadline: Date.now() + (duration * 1000) + 60000,
           last_heartbeat: Date.now(),
           state: 'GRANTED',
-          requested_duration_ms: durationSeconds * 1000
+          requested_duration_ms: duration * 1000
       });
       this.resourceStates.set(resource, 'GRANTED');
 
@@ -238,31 +256,12 @@ export class LeaseManager {
   public async yieldLease(req: YieldRequest, force: boolean = false): Promise<boolean> {
       for (const [resource, lease] of this.activeLeases.entries()) {
           if (lease.token === req.token) {
-              const artifacts: string[] = [];
-              try {
-                  const adapter = await this.getAdapter(resource);
-                  if (process.env.ARBITER_SKIP_ARTIFACTS !== 'true') {
-                      artifacts.push(await adapter.captureLogs());
-                      artifacts.push(await adapter.screenshot());
-                  }
-              } catch (e) {
-                  warn(`Failed to capture artifacts via adapter: ${e}`);
-              }
+              // 1. Calculate duration and capture necessary info for background work
+              const startTime = lease.expires_at - lease.requested_duration_ms;
+              const durationSeconds = Math.round((Date.now() - startTime) / 1000);
+              const token = lease.token;
 
-              const ctx: ArbiterContext = {
-                  schema_version: 1,
-                  resource: resource,
-                  session_id: lease.token,
-                  duration_seconds: Math.round((Date.now() - (lease.expires_at - lease.requested_duration_ms)) / 1000), 
-                  outcome: req.reason || 'yielded',
-                  artifacts: artifacts
-              };
-              
-              if (req.context) Object.assign(ctx, req.context);
-
-              ContextManager.saveContext(ctx);
-
-              // Check if we should drain instead of immediate free
+              // 2. State Transition Logic (FAST & ATOMIC)
               const permits = this.pendingPermits.get(resource) || {};
               const runningCount = Object.values(permits).filter((p: any) => p.executionStatus === 'RUNNING').length;
               const queueDepth = this.queueDepthResolver ? this.queueDepthResolver(resource) : 0;
@@ -270,9 +269,8 @@ export class LeaseManager {
               if (!force && this.experimentalScheduling && runningCount > 0) {
                   lease.state = 'DRAINING';
                   this.resourceStates.set(resource, 'DRAINING');
-                  log(`[Watchdog] Lease ${req.token} yielded but resource ${resource} is DRAINING ${runningCount} permits.`);
+                  log(`[Arbiter] Lease ${req.token} yielded; resource ${resource} enters DRAINING (${runningCount} permits).`);
               } else if (!force && this.experimentalScheduling && queueDepth === 0 && req.reason === 'release') {
-                  // If it's a voluntary release and no one is waiting, move to AVAILABLE
                   lease.state = 'AVAILABLE';
                   this.resourceStates.set(resource, 'AVAILABLE');
                   log(`[Arbiter] Lease ${req.token} transitioned to AVAILABLE (Queue empty).`);
@@ -284,11 +282,58 @@ export class LeaseManager {
                   this.resourceStates.set(resource, 'FREE');
                   if (this.onResourceFree) this.onResourceFree(resource);
               }
+
+              // 3. Trigger background work (FIRE AND FORGET)
+              this.finalizeLeaseContextInBackground(resource, token, durationSeconds, req)
+                  .catch(e => warn(`[Background] Finalization error for ${resource}: ${e}`));
               
               return true;
           }
       }
       return false;
+  }
+
+  private async finalizeLeaseContextInBackground(resource: string, token: string, durationSeconds: number, req: YieldRequest) {
+      const artifacts: string[] = [];
+      try {
+          // Strict timeout for adapter calls to ensure background work doesn't hang forever
+          const withTimeout = async <T>(promise: Promise<T>, ms: number): Promise<T> => {
+              const timeout = new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`Timeout after ${ms}ms`)), ms));
+              return Promise.race([promise, timeout]);
+          };
+
+          if (process.env.ARBITER_SKIP_ARTIFACTS !== 'true') {
+              const adapter = await this.getAdapter(resource);
+              try {
+                  const logPath = await withTimeout(adapter.captureLogs(), 5000) as string;
+                  if (logPath) artifacts.push(logPath);
+              } catch (e: any) { warn(`[Background] captureLogs failed for ${resource}: ${e.message}`); }
+
+              try {
+                  const screenshotPath = await withTimeout(adapter.screenshot(), 5000) as string;
+                  if (screenshotPath) artifacts.push(screenshotPath);
+              } catch (e: any) { warn(`[Background] screenshot failed for ${resource}: ${e.message}`); }
+          }
+      } catch (e: any) {
+          warn(`[Background] Adapter access failed for ${resource}: ${e.message || e}`);
+      }
+
+      const ctx: ArbiterContext = {
+          schema_version: 1,
+          resource: resource,
+          session_id: token,
+          duration_seconds: durationSeconds,
+          outcome: req.reason || 'yielded',
+          artifacts: artifacts
+      };
+      
+      if (req.context) Object.assign(ctx, req.context);
+
+      try {
+          ContextManager.saveContext(ctx);
+      } catch (e: any) {
+          warn(`[Background] saveContext failed for ${resource}: ${e.message || e}`);
+      }
   }
 
   public touchHeartbeat(token: string): boolean {
@@ -515,12 +560,14 @@ export class LeaseManager {
               log(`[Watchdog] Lease ${lease.token} moved to EXPIRING (Soft Cutoff Active)`);
           }
 
-          // 2. Immediate Reclamation on Contention for Expired Leases
-          // If expired AND someone is waiting AND no command is actively heartbeating...
-          if (lease.state === 'EXPIRING' && queueDepth > 0) {
-              const isActivelyWorking = (now - lease.last_heartbeat < 15000); // Heartbeat every 10s
-              if (!isActivelyWorking) {
-                  log(`[Watchdog] Lease ${lease.token} expired and resource is contended. Reclaiming immediately.`);
+          // 2. Immediate Reclamation on Contention for Expired/Available Leases
+          // If expired/available AND someone is waiting...
+          if ((lease.state === 'EXPIRING' || lease.state === 'AVAILABLE') && queueDepth > 0) {
+              const resConfig = this.ceilingConfig?.[resource] || {};
+              const hbTimeout = resConfig.heartbeat_timeout_seconds || this.globalConfig?.heartbeat_timeout_seconds || 15;
+              const isActivelyWorking = (now - lease.last_heartbeat < (hbTimeout * 1000)); 
+              if (lease.state === 'AVAILABLE' || !isActivelyWorking) {
+                  log(`[Watchdog] Lease ${lease.token} (${lease.state}) is contended. Reclaiming immediately.`);
                   // Universal DRAINING: Use force=false to allow draining if permits are running
                   await this.yieldLease({ token: lease.token, reason: 'expired_contention' }, false);
                   continue;
@@ -536,8 +583,8 @@ export class LeaseManager {
           }
           
           // 4. Hard Deadline (if command refuses to yield forever, preventing Expiry)
-          if (lease.state === 'EXPIRING' && now > lease.hard_deadline) {
-             log(`[Watchdog] Lease ${lease.token} exceeded Hard Deadline on ${resource}! Force-releasing.`);
+          if ((lease.state === 'EXPIRING' || lease.state === 'DRAINING') && now > lease.hard_deadline) {
+             log(`[Watchdog] Lease ${lease.token} exceeded Hard Deadline on ${resource} while ${lease.state}! Force-releasing.`);
              await this.yieldLease({ token: lease.token, reason: 'hard_timeout' }, true);
              continue;
           }
@@ -554,7 +601,9 @@ export class LeaseManager {
                       if (lease.state === 'DRAINING') this.checkDrainCompletion(resource);
                   }
                   // permit_heartbeat_timeout: default 15 seconds after last heartbeat
-                  if (p.executionStatus === 'RUNNING' && p.last_heartbeat_at && now - p.last_heartbeat_at > 15000) {
+                  const resConfig = this.ceilingConfig?.[resource] || {};
+                  const hbTimeout = resConfig.heartbeat_timeout_seconds || this.globalConfig?.heartbeat_timeout_seconds || 15;
+                  if (p.executionStatus === 'RUNNING' && p.last_heartbeat_at && now - p.last_heartbeat_at > (hbTimeout * 1000)) {
                       log(`[Watchdog] Permit ${p.id} abandoned: Heartbeat timeout.`);
                       p.executionStatus = 'ABANDONED';
                       if (lease.state === 'DRAINING') this.checkDrainCompletion(resource);

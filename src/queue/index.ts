@@ -19,6 +19,7 @@ interface QueueEntry {
 
 class QueueEngine {
   private queue: Map<string, QueueEntry[]> = new Map();
+  private pumping: Set<string> = new Set();
   public experimentalScheduling: boolean = true;
 
   public getQueueDepth(resource: string): number {
@@ -178,66 +179,81 @@ class QueueEngine {
           return;
       }
       
-      const resourceQueue = this.queue.get(resource) || [];
-      if (resourceQueue.length === 0) return;
+      if (this.pumping.has(resource)) return;
+      this.pumping.add(resource);
 
-      const state = leaseManager.getResourceState(resource);
-      
-      // Experimental Scheduling: Block if DRAINING
-      if (this.experimentalScheduling && state === 'DRAINING') {
-          return;
-      }
+      try {
+          while (true) {
+              const resourceQueue = this.queue.get(resource) || [];
+              if (resourceQueue.length === 0) break;
 
-      if (state === 'FREE' || state === 'AVAILABLE') {
-          const head = resourceQueue[0];
-          if (!head) return;
-
-          // Milestone 3: Handle READY state for Reservations
-          if (this.experimentalScheduling && head.wait_mode === 'ASYNC') {
-              if (head.status === 'WAITING') {
-                  head.status = 'READY';
-                  head.ready_at = Date.now();
-                  const claimWindowMs = parseInt(process.env.ARBITER_TICKET_CLAIM_WINDOW || '45') * 1000;
-                  head.claim_deadline = Date.now() + claimWindowMs;
-                  log(`[Queue] Entry READY for claim: id=${head.id}, resource=${resource}, deadline=${new Date(head.claim_deadline).toISOString()}`);
-                  return; // Stop here, wait for claim or timeout
+              const state = leaseManager.getResourceState(resource);
+              
+              // Experimental Scheduling: Block if DRAINING
+              if (this.experimentalScheduling && state === 'DRAINING') {
+                  break;
               }
-              if (head.status === 'READY') {
-                  // Check for timeout
-                  if (Date.now() > (head.claim_deadline || 0)) {
-                      log(`[Queue] Entry MISSED turn: id=${head.id}, resource=${resource}`);
-                      head.status = 'MISSED';
-                      resourceQueue.shift();
-                      this.pump(resource);
+
+              if (state === 'FREE' || state === 'AVAILABLE') {
+                  const head = resourceQueue[0];
+                  if (!head) break;
+
+                  // Milestone 3: Handle READY state for Reservations
+                  if (this.experimentalScheduling && head.wait_mode === 'ASYNC') {
+                      if (head.status === 'WAITING') {
+                          head.status = 'READY';
+                          head.ready_at = Date.now();
+                          const claimWindowMs = parseInt(process.env.ARBITER_TICKET_CLAIM_WINDOW || '45') * 1000;
+                          head.claim_deadline = Date.now() + claimWindowMs;
+                          log(`[Queue] Entry READY for claim: id=${head.id}, resource=${resource}, deadline=${new Date(head.claim_deadline).toISOString()}`);
+                          break; // Stop here, wait for claim or timeout
+                      }
+                      if (head.status === 'READY') {
+                          // Check for timeout
+                          if (Date.now() > (head.claim_deadline || 0)) {
+                              log(`[Queue] Entry MISSED turn: id=${head.id}, resource=${resource}`);
+                              head.status = 'MISSED';
+                              resourceQueue.shift();
+                              continue; // Loop again to pump next entry
+                          }
+                          break; // Still waiting for claim
+                      }
                   }
-                  return; // Still waiting for claim
+
+                  const next = resourceQueue.shift();
+                  if (next) {
+                      try {
+                        // If it was AVAILABLE, we must yield the old lease first to ensure clean state!
+                        if (state === 'AVAILABLE') {
+                            const activeToken = leaseManager.getActiveLeaseToken(resource);
+                            if (activeToken) {
+                                log(`[Queue] Preempting AVAILABLE lease ${activeToken} for new request ${next.id}.`);
+                                // Explicitly delete from internal map to free up for grantLease
+                                // NOTE: forceReclaim(..., 'FREE') calls this.onResourceFree which calls pump recursively.
+                                // Our pumping guard handles this!
+                                leaseManager.forceReclaim(resource, 'FREE');
+                            }
+                        }
+
+                        if (this.experimentalScheduling) {
+                            log(`[Queue] Entry Promoted: id=${next.id}, resource=${resource}`);
+                            next.status = 'CLAIMED';
+                        }
+
+                        const token = leaseManager.grantLease(resource, next.request.duration_seconds);
+                        next.resolve(token);
+                      } catch (e: any) {
+                        next.reject(e);
+                      }
+                  }
+                  // grantLease moves it to GRANTED, so state will no longer be FREE/AVAILABLE in next iteration.
+                  continue; 
+              } else {
+                  break;
               }
           }
-
-          const next = resourceQueue.shift();
-          if (next) {
-              try {
-                // If it was AVAILABLE, we must yield the old lease first to ensure clean state!
-                if (state === 'AVAILABLE') {
-                    const activeToken = leaseManager.getActiveLeaseToken(resource);
-                    if (activeToken) {
-                        log(`[Queue] Preempting AVAILABLE lease ${activeToken} for new request ${next.id}.`);
-                        // Explicitly delete from internal map to free up for grantLease
-                        leaseManager.forceReclaim(resource, 'FREE');
-                    }
-                }
-
-                if (this.experimentalScheduling) {
-                    log(`[Queue] Entry Promoted: id=${next.id}, resource=${resource}`);
-                    next.status = 'CLAIMED';
-                }
-
-                const token = leaseManager.grantLease(resource, next.request.duration_seconds);
-                next.resolve(token);
-              } catch (e: any) {
-                next.reject(e);
-              }
-          }
+      } finally {
+          this.pumping.delete(resource);
       }
   }
 
@@ -268,22 +284,7 @@ class QueueEngine {
                       this.pump(resource);
                       return resolve({ token });
                   } else if (entry.status === 'WAITING') {
-                      log(`[Queue] Ticket Claim received early (WAITING state). Shifting back to BLOCKING mode: id=${ticketId}`);
-                      entry.wait_mode = 'BLOCKING'; // Convert back to blocking so pump() natively handles it!
-                      entry.claim_pending = true;   // Prevent watchdog from async-shifting while claim is in flight
-                      const oldResolve = entry.resolve;
-                      const oldReject = entry.reject;
-                      entry.resolve = (token: string) => {
-                          entry.claim_pending = false;
-                          resolve({ token });
-                          oldResolve(token);
-                      };
-                      entry.reject = (err: Error) => {
-                          entry.claim_pending = false;
-                          resolve({ token: null, error: err.message });
-                          oldReject(err);
-                      };
-                      return; // Do NOT resolve the promise yet. Wait for pump() to promote it naturally!
+                      return resolve({ token: null, error: 'ticket_still_waiting' });
                   } else if (entry.status === 'MISSED') {
                       return resolve({ token: null, error: 'ticket_missed_turn' });
                   } else if (entry.status === 'EXPIRED') {

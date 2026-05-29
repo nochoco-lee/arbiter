@@ -1,8 +1,9 @@
 import { Adapter, AdapterConfig } from './types';
-import { spawn, spawnSync } from 'child_process';
+import { spawn } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
+import { boundedExec } from './utils';
 
 export class IosAdapter implements Adapter {
     private config!: AdapterConfig;
@@ -16,36 +17,16 @@ export class IosAdapter implements Adapter {
             throw new Error('iOS configuration missing UDID');
         }
 
-        const res = spawnSync(this.simctlPath, ['simctl', 'bootstatus', this.config.udid, '-b']);
+        await boundedExec(this.simctlPath, ['simctl', 'bootstatus', this.config.udid, '-b'], { timeoutMs: 60000 });
         // bootstatus might fail if not booted or already booted, but -b attempts to boot.
     }
 
     async execute(args: string[]): Promise<{ stdout: string; stderr: string; exitCode: number; }> {
-        const fullArgs = ['simctl', ...args.slice(0, 1), this.config.udid!, ...args.slice(1)];
-        // Wait, simctl usually expects: simctl <command> <udid> <args>
-        // But some commands don't take udid. This is tricky.
-        // For transparency, we should probably just prepend 'simctl' and let the user provide the rest.
-        // But the previous implementation inserted UDID.
-        
-        const res = spawnSync(this.simctlPath, ['simctl', ...args], { encoding: 'utf-8' });
-        // Actually, if we want transparency, the user should provide the udid if needed, 
-        // OR we should have a way to inject it.
-        // Let's stick to the previous logic of injecting UDID for specific commands if we can, 
-        // but for 'execute' we should probably be more generic.
-        
-        // Re-evaluating: the previous implementation was:
-        // const fullArgs = ['simctl', command, this.config.udid!, ...args];
-        
         const command = args[0];
         const remainingArgs = args.slice(1);
         const argsWithUdid = ['simctl', command, this.config.udid!, ...remainingArgs];
 
-        const res2 = spawnSync(this.simctlPath, argsWithUdid, { encoding: 'utf-8' });
-        return {
-            stdout: res2.stdout || '',
-            stderr: res2.stderr || '',
-            exitCode: res2.status ?? 1
-        };
+        return await boundedExec(this.simctlPath, argsWithUdid);
     }
 
     async stream(args: string[], onData: (data: string) => void): Promise<void> {

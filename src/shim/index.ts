@@ -55,80 +55,101 @@ function getHardTimeoutOverrides(caller: string, args: string[]): number {
     return 60; // default 60s hard timeout
 }
 
-async function checkLease(token: string, reactivate: boolean = true): Promise<{valid: boolean, expires_at?: number, queueDepth?: number, error?: string, status?: number}> {
+async function shimRequest<T>(url: string, options: http.RequestOptions = {}, body?: any): Promise<{ data: T | null, status: number, error?: string }> {
     return new Promise((resolve) => {
-        const req = http.request(`${BROKER_URL}/status?reactivate=${reactivate}`, {
-            method: 'GET',
-            headers: { 'Authorization': `Bearer ${token}` }
-        }, (res: http.IncomingMessage) => {
+        const req = http.request(url, {
+            ...options,
+            timeout: options.timeout || 5000,
+            headers: {
+                'Content-Type': 'application/json',
+                ...options.headers
+            }
+        }, (res) => {
             let data = '';
             res.on('data', d => data += d);
             res.on('end', () => {
                 try {
-                    resolve(JSON.parse(data));
-                } catch {
-                    resolve({valid: res.statusCode === 200, status: res.statusCode});
+                    resolve({ data: JSON.parse(data || '{}'), status: res.statusCode || 0 });
+                } catch (e) {
+                    resolve({ data: null, status: res.statusCode || 0, error: 'JSON_PARSE_ERROR' });
                 }
             });
         });
-        
-        req.on('error', (e) => resolve({valid: false, error: e.message}));
+
+        req.on('timeout', () => {
+            req.destroy();
+            resolve({ data: null, status: 0, error: 'TIMEOUT' });
+        });
+
+        req.on('error', (e) => {
+            resolve({ data: null, status: 0, error: e.message });
+        });
+
+        if (body) {
+            req.write(JSON.stringify(body));
+        }
         req.end();
     });
 }
 
-async function checkResourceStatus(resource: string): Promise<any> {
-    return new Promise((resolve) => {
-        const req = http.request(`${BROKER_URL}/status?resource=${encodeURIComponent(resource)}`, {
-            method: 'GET'
-        }, (res: http.IncomingMessage) => {
-            let data = '';
-            res.on('data', d => data += d);
-            res.on('end', () => {
-                try {
-                    resolve(JSON.parse(data));
-                } catch {
-                    resolve({ error: 'invalid_response', status: res.statusCode });
-                }
-            });
-        });
-        
-        req.on('error', (e) => resolve({ error: e.message }));
-        req.end();
+async function checkLease(token: string, reactivate: boolean = true): Promise<{valid: boolean, expires_at?: number, queueDepth?: number, error?: string, status?: number}> {
+    const res = await shimRequest<any>(`${BROKER_URL}/status?reactivate=${reactivate}`, {
+        method: 'GET',
+        headers: { 'Authorization': `Bearer ${token}` }
     });
+    if (res.error) return { valid: false, error: res.error };
+    return { ...res.data, valid: res.status === 200, status: res.status };
+}
+
+async function checkResourceStatus(resource: string): Promise<any> {
+    const res = await shimRequest<any>(`${BROKER_URL}/status?resource=${encodeURIComponent(resource)}`, {
+        method: 'GET'
+    });
+    return res.data || { error: res.error || 'unknown_error' };
 }
 
 async function executePermitCommand(commands: string, permitToken: string) {
     // Notify Start
-    await new Promise((resolve) => {
-        const req = http.request(`${BROKER_URL}/api/permit/execution/start`, { method: 'POST' }, (res) => resolve(res.statusCode));
-        req.on('error', () => resolve(500));
-        req.write(JSON.stringify({ token: permitToken })); req.end();
-    });
+    await shimRequest(`${BROKER_URL}/api/permit/execution/start`, { method: 'POST' }, { token: permitToken });
 
-    const hb = setInterval(() => {
-        const req = http.request(`${BROKER_URL}/api/permit/execution/heartbeat`, { method: 'POST' });
-        req.on('error', () => {});
-        req.write(JSON.stringify({ token: permitToken })); req.end();
+    const hb = setInterval(async () => {
+        await shimRequest(`${BROKER_URL}/api/permit/execution/heartbeat`, { method: 'POST' }, { token: permitToken });
     }, 10000);
 
     const pArgs = commands.split(' ').slice(1);
     const cmdBase = commands.split(' ')[0];
     const pBinParts = (REAL_BIN_MAP[cmdBase] || `/usr/bin/${cmdBase}`).split(' ');
 
-    const { spawnSync } = require('child_process');
-    spawnSync(pBinParts[0], [...pBinParts.slice(1), ...pArgs], { 
+    const { spawn } = require('child_process');
+    const child = spawn(pBinParts[0], [...pBinParts.slice(1), ...pArgs], { 
         stdio: 'inherit', 
-        env: { ...process.env, ARBITER_LEASE_TOKEN: permitToken }
+        env: { ...process.env, ARBITER_LEASE_TOKEN: permitToken },
+        detached: process.platform !== 'win32'
     });
 
-    clearInterval(hb);
+    const timeoutMs = 120000; // 2 minute default for permit commands
+    const timer = setTimeout(() => {
+        if (process.platform === 'win32') {
+            spawnSync('taskkill', ['/pid', child.pid, '/f', '/t']);
+        } else {
+            process.kill(-child.pid, 'SIGKILL');
+        }
+        process.stderr.write(`\n${getTimestamp()} [ARBITER] Permit command timed out and was killed.\n`);
+    }, timeoutMs);
 
-    // Notify Finish
-    await new Promise((resolve) => {
-        const req = http.request(`${BROKER_URL}/api/permit/execution/finish`, { method: 'POST' }, (res) => resolve(res.statusCode));
-        req.on('error', () => resolve(500));
-        req.write(JSON.stringify({ token: permitToken })); req.end();
+    return new Promise<void>((resolve) => {
+        child.on('close', async () => {
+            clearTimeout(timer);
+            clearInterval(hb);
+            await shimRequest(`${BROKER_URL}/api/permit/execution/finish`, { method: 'POST' }, { token: permitToken });
+            resolve();
+        });
+        child.on('error', async () => {
+            clearTimeout(timer);
+            clearInterval(hb);
+            await shimRequest(`${BROKER_URL}/api/permit/execution/finish`, { method: 'POST' }, { token: permitToken });
+            resolve();
+        });
     });
 }
 
@@ -141,6 +162,7 @@ USAGE:
 
 COMMANDS:
   start                  Start the Arbiter Broker daemon in the foreground.
+    --resume, -r         Restore the previous broker state from .arbiter_broker_state.json.
   tui                    Launch the Terminal UI monitor.
   doctor                 Run system diagnostics to check Broker health.
   logs                   Print the last 200 broker log lines.
@@ -250,6 +272,12 @@ async function remoteExec(wsUrl: string, token: string, resource: string, args: 
             }
         });
 
+        const hbInterval = setInterval(() => {
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'heartbeat' }));
+            }
+        }, 10000);
+
         ws.on('message', (raw: Buffer) => {
             let msg: any;
             try { msg = JSON.parse(raw.toString()); } catch { return; }
@@ -263,8 +291,12 @@ async function remoteExec(wsUrl: string, token: string, resource: string, args: 
             }
         });
 
-        ws.on('close', () => resolve());
+        ws.on('close', () => {
+            clearInterval(hbInterval);
+            resolve();
+        });
         ws.on('error', (e: Error) => {
+            clearInterval(hbInterval);
             process.stderr.write(`${getTimestamp()} [ARBITER REMOTE] Connection to ${wsUrl} failed: ${e.message}\n`);
             process.stderr.write(`${getTimestamp()} [ARBITER REMOTE] Ensure the broker is running on the remote host with ARBITER_BIND set.\n`);
             reject(e);
@@ -428,7 +460,8 @@ async function main() {
             require('../cli/skills').handleSkillsCommand(args.slice(1));
             return;
         } else if (cmd === 'start') {
-            require('../broker/server').startBroker();
+            const resume = args.includes('--resume') || args.includes('-r');
+            require('../broker/server').startBroker({ resume });
             return;
         } else if (cmd === 'tui') {
             require('../cli/tui').startTui();
@@ -488,36 +521,29 @@ async function main() {
                  return;
              }
         } else if (cmd === 'extend') {
-             const req = http.request(`${BROKER_URL}/api/lease/extend`, { method: 'POST' }, (res) => {
-                 process.stdout.write(res.statusCode === 200
-                    ? "Extension granted. Continue current resource work.\n"
-                    : "Extension denied. Another agent may be waiting too long; finish promptly or release.\n");
-             });
-             req.on('error', () => {
+             const res = await shimRequest<any>(`${BROKER_URL}/api/lease/extend`, { method: 'POST' }, { token });
+             if (res.error) {
                  process.stderr.write(`${getTimestamp()} [ARBITER] Could not connect to broker at ${BROKER_URL}. Is 'arbiter start' running?\n`);
                  process.exit(1);
-             });
-             req.write(JSON.stringify({ token })); req.end();
+             }
+             process.stdout.write(res.status === 200
+                ? "Extension granted. Continue current resource work.\n"
+                : "Extension denied. Another agent may be waiting too long; finish promptly or release.\n");
              return;
         } else if (cmd === 'release') {
-             const req = http.request(`${BROKER_URL}/api/lease/release`, { method: 'POST' }, (res) => {
-                 let d = ''; res.on('data', c => d += c);
-                 res.on('end', () => {
-                     const yielded = JSON.parse(d).yielded;
-                     if (yielded) {
-                         process.stdout.write("Release processed. The resource has been handed off or is draining for handoff.\n");
-                         process.stdout.write("Next: stop issuing resource commands with this lease token.\n");
-                     } else {
-                         process.stdout.write("Release logged. Queue is empty, so the lease remains warm in AVAILABLE state.\n");
-                         process.stdout.write("Next: either continue with more resource work, or remain idle and let the lease expire if all work is done.\n");
-                     }
-                 });
-             });
-             req.on('error', () => {
+             const res = await shimRequest<any>(`${BROKER_URL}/api/lease/release`, { method: 'POST' }, { token });
+             if (res.error) {
                  process.stderr.write(`${getTimestamp()} [ARBITER] Could not connect to broker at ${BROKER_URL}. Is 'arbiter start' running?\n`);
                  process.exit(1);
-             });
-             req.write(JSON.stringify({ token })); req.end();
+             }
+             const yielded = res.data?.yielded;
+             if (yielded) {
+                 process.stdout.write("Release processed. The resource has been handed off or is draining for handoff.\n");
+                 process.stdout.write("Next: stop issuing resource commands with this lease token.\n");
+             } else {
+                 process.stdout.write("Release logged. Queue is empty, so the lease remains warm in AVAILABLE state.\n");
+                 process.stdout.write("Next: either continue with more resource work, or remain idle and let the lease expire if all work is done.\n");
+             }
              return;
         } else if (cmd === 'lease' && args[1] === 'status') {
              let resourceArg = '';
@@ -527,7 +553,7 @@ async function main() {
 
              if (resourceArg) {
                  const status = await checkResourceStatus(resourceArg);
-                 if (status.error && status.error.includes('ECONNREFUSED')) {
+                 if (status.error && (status.error.includes('ECONNREFUSED') || status.error === 'TIMEOUT')) {
                       process.stderr.write(`${getTimestamp()} [ARBITER] Could not connect to broker at ${BROKER_URL}. Is 'arbiter start' running?\n`);
                       process.exit(1);
                  }
@@ -541,42 +567,31 @@ async function main() {
              return;
         } else if (cmd === 'estimate') {
              const targetCmd = args.slice(1).join(' ');
-             const req = http.request(`${BROKER_URL}/api/lease/estimate`, { method: 'POST' }, (res) => {
-                 let d = ''; res.on('data', c => d += c);
-                 res.on('end', () => {
-                     try {
-                        process.stdout.write(JSON.stringify(JSON.parse(d), null, 2) + "\n");
-                     } catch(e) {
-                        process.stderr.write(`${getTimestamp()} [ARBITER SHIM] Error: Invalid response from broker for estimate: ${d} (Status: ${res.statusCode})\n`);
-                     }
-                 });
-             });
-             req.on('error', () => {
+             const res = await shimRequest<any>(`${BROKER_URL}/api/lease/estimate`, { method: 'POST' }, { token, command: targetCmd });
+             if (res.error) {
                  process.stderr.write(`${getTimestamp()} [ARBITER] Could not connect to broker at ${BROKER_URL}. Is 'arbiter start' running?\n`);
                  process.exit(1);
-             });
-             req.write(JSON.stringify({ token, command: targetCmd })); req.end();
+             }
+             if (res.data) {
+                process.stdout.write(JSON.stringify(res.data, null, 2) + "\n");
+             } else {
+                process.stderr.write(`${getTimestamp()} [ARBITER SHIM] Error: Invalid response from broker for estimate (Status: ${res.status})\n`);
+             }
              return;
         } else if (cmd === 'state' && args[1] === 'history') {
-             const req = http.request(`${BROKER_URL}/api/state/history`, { method: 'POST' }, (res) => {
-                 let d = ''; res.on('data', c => d += c);
-                 res.on('end', () => {
-                     try {
-                        const out = JSON.parse(d);
-                        process.stdout.write("=== Command Audit History ===\n");
-                        (out.history || []).forEach((h: any) => {
-                            process.stdout.write(`[${h.timestamp}] ${h.command} (token: ${h.token.substring(0,8)}...)\n`);
-                        });
-                     } catch(e) {
-                        process.stderr.write(`${getTimestamp()} [ARBITER SHIM] Error: Invalid response from broker for history. (Status: ${res.statusCode})\n`);
-                     }
-                 });
-             });
-             req.on('error', () => {
+             const res = await shimRequest<any>(`${BROKER_URL}/api/state/history`, { method: 'POST' }, { token });
+             if (res.error) {
                  process.stderr.write(`${getTimestamp()} [ARBITER] Could not connect to broker at ${BROKER_URL}. Is 'arbiter start' running?\n`);
                  process.exit(1);
-             });
-             req.write(JSON.stringify({ token })); req.end();
+             }
+             if (res.data) {
+                process.stdout.write("=== Command Audit History ===\n");
+                (res.data.history || []).forEach((h: any) => {
+                    process.stdout.write(`[${h.timestamp}] ${h.command} (token: ${h.token.substring(0,8)}...)\n`);
+                });
+             } else {
+                process.stderr.write(`${getTimestamp()} [ARBITER SHIM] Error: Invalid response from broker for history. (Status: ${res.status})\n`);
+             }
              return;
         } else if (cmd === 'request') {
              let resource = args[0] === 'request' ? args[1] : ''; 
@@ -588,50 +603,54 @@ async function main() {
                  if (args[i] === '--ticket') ticketId = args[++i];
              }
 
-             if (ticketId) {
-                const treq = http.request(`${BROKER_URL}/api/reservation/claim`, { method: 'POST' }, (res) => {
-                    let d = ''; res.on('data', c => d+=c);
-                    res.on('end', () => {
-                        if (res.statusCode === 200) {
-                            const out = JSON.parse(d);
-                            // Defence-in-depth: a real lease token is always a UUID, never a q_ ticket ID
-                            if (!out.token || out.token.startsWith('q_') || !out.resource) {
-                                process.stderr.write(`${getTimestamp()} [ARBITER] Internal error: broker returned an invalid lease token. Please retry.\n`);
-                                process.exit(1);
-                            }
-                            process.stderr.write(`${getTimestamp()} [ARBITER] Ticket CLAIMED! Granted Access to: ${out.resource}\n`);
-                            process.stderr.write(`${getTimestamp()} [ARBITER] Next: export the lease token below, then run the resource command.\n`);
-                            if (process.platform === 'win32') {
-                                process.stdout.write(`:: Command Prompt\nSET ARBITER_LEASE_TOKEN=${out.token}\n`);
-                                process.stdout.write(`# PowerShell\n$env:ARBITER_LEASE_TOKEN='${out.token}'\n`);
-                            } else {
-                                process.stdout.write(`export ARBITER_LEASE_TOKEN=${out.token}\n`);
-                            }
-                            process.exit(0);
-                        } else {
-                            const err = JSON.parse(d);
-                            if (err.error === 'ticket_still_waiting') {
-                                process.stderr.write(`${getTimestamp()} [ARBITER] Ticket claim failed: your reservation is not ready yet.\n`);
-                                process.stderr.write(`${getTimestamp()} [ARBITER] Next: continue non-device work and retry the claim later.\n`);
-                            } else if (err.error === 'ticket_missed_turn') {
-                                process.stderr.write(`${getTimestamp()} [ARBITER] Ticket claim failed: your reservation missed its claim window.\n`);
-                                process.stderr.write(`${getTimestamp()} [ARBITER] Next: request a new lease or a new async reservation.\n`);
-                            } else if (err.error === 'ticket_expired') {
-                                process.stderr.write(`${getTimestamp()} [ARBITER] Ticket claim failed: this reservation has expired.\n`);
-                                process.stderr.write(`${getTimestamp()} [ARBITER] Next: request a new lease or reservation.\n`);
-                            } else {
-                                process.stderr.write(`${getTimestamp()} [ARBITER] Ticket claim failed: ${err.error}\n`);
-                                process.stderr.write(`${getTimestamp()} [ARBITER] Next: request a new lease if you still need this resource.\n`);
-                            }
-                            process.exit(1);
-                        }
-                    });
-                });
-                treq.on('error', () => {
+             const pollTicket = async (tid: string) => {
+                const res = await shimRequest<any>(`${BROKER_URL}/api/reservation/claim`, { method: 'POST' }, { ticketId: tid });
+                if (res.error) {
                     process.stderr.write(`${getTimestamp()} [ARBITER] Could not connect to broker at ${BROKER_URL}. Is 'arbiter start' running?\n`);
                     process.exit(1);
-                });
-                treq.write(JSON.stringify({ ticketId })); treq.end();
+                }
+
+                if (res.status === 200) {
+                    const out = res.data!;
+                    if (!out.token || out.token.startsWith('q_') || !out.resource) {
+                        process.stderr.write(`${getTimestamp()} [ARBITER] Internal error: broker returned an invalid lease token. Please retry.\n`);
+                        process.exit(1);
+                    }
+                    process.stderr.write(`${getTimestamp()} [ARBITER] Ticket CLAIMED! Granted Access to: ${out.resource}\n`);
+                    process.stderr.write(`${getTimestamp()} [ARBITER] Next: export the lease token below, then run the resource command.\n`);
+                    if (process.platform === 'win32') {
+                        process.stdout.write(`:: Command Prompt\nSET ARBITER_LEASE_TOKEN=${out.token}\n`);
+                        process.stdout.write(`# PowerShell\n$env:ARBITER_LEASE_TOKEN='${out.token}'\n`);
+                    } else {
+                        process.stdout.write(`export ARBITER_LEASE_TOKEN=${out.token}\n`);
+                    }
+                    process.exit(0);
+                } else {
+                    const err = res.data!;
+                    if (err.error === 'ticket_still_waiting') {
+                        if (autoWait) {
+                            process.stderr.write(`${getTimestamp()} [ARBITER] Reservation not ready yet. Retrying in 15s...\n`);
+                            setTimeout(() => pollTicket(tid), 15000);
+                            return;
+                        }
+                        process.stderr.write(`${getTimestamp()} [ARBITER] Ticket claim failed: your reservation is not ready yet.\n`);
+                        process.stderr.write(`${getTimestamp()} [ARBITER] Next: continue non-device work and retry the claim later.\n`);
+                    } else if (err.error === 'ticket_missed_turn') {
+                        process.stderr.write(`${getTimestamp()} [ARBITER] Ticket claim failed: your reservation missed its claim window.\n`);
+                        process.stderr.write(`${getTimestamp()} [ARBITER] Next: request a new lease or a new async reservation.\n`);
+                    } else if (err.error === 'ticket_expired') {
+                        process.stderr.write(`${getTimestamp()} [ARBITER] Ticket claim failed: this reservation has expired.\n`);
+                        process.stderr.write(`${getTimestamp()} [ARBITER] Next: request a new lease or reservation.\n`);
+                    } else {
+                        process.stderr.write(`${getTimestamp()} [ARBITER] Ticket claim failed: ${err.error}\n`);
+                        process.stderr.write(`${getTimestamp()} [ARBITER] Next: request a new lease if you still need this resource.\n`);
+                    }
+                    process.exit(1);
+                }
+             };
+
+             if (ticketId) {
+                pollTicket(ticketId);
                 return;
              }
 
@@ -664,63 +683,64 @@ async function main() {
                      }, 30000);
                  }
 
-                 const breq = http.request(`${BROKER_URL}/request`, { method: 'POST' }, (res) => {
-                     if (progressIv) clearInterval(progressIv);
-                     let d = ''; res.on('data', c => d+=c);
-                     res.on('end', () => {
-                         if (res.statusCode === 409) {
-                             const parseW = JSON.parse(d);
-                             if (autoWait || asyncMode) {
-                                 process.stderr.write(`${getTimestamp()} [ARBITER] Conflict detected: ${parseW.warning}\n`);
-                                 process.stderr.write(`${getTimestamp()} [ARBITER] Next: queue safely and wait for your turn.\n`);
-                                 makeReq(true);
-                             } else {
-                                 process.stderr.write(`${getTimestamp()} [ARBITER] Conflict: ${parseW.warning}\n`);
-                                 process.stderr.write(`${getTimestamp()} [ARBITER] Next: use '--wait' if this resource is needed now, or '--async' if you can continue other work first.\n`);
-                                 process.exit(1);
-                             }
-                         } else if (res.statusCode === 200 || res.statusCode === 202) {
-                             const out = JSON.parse(d);
-                             if (res.statusCode === 202) {
-                                 process.stderr.write(`${getTimestamp()} [ARBITER] Async Reservation Created! Ticket ID: ${out.token}\n`);
-                                 if (out.estimated_wait_seconds !== undefined) {
-                                     const mins = Math.floor(out.estimated_wait_seconds / 60);
-                                     const secs = out.estimated_wait_seconds % 60;
-                                     process.stderr.write(`${getTimestamp()} [ARBITER] Estimated wait: ${mins}m ${secs}s\n`);
-                                 }
-                                 process.stderr.write(`${getTimestamp()} [ARBITER] Next: continue non-device work, then claim when the resource is likely ready.\n`);
-                                 process.stderr.write(`${getTimestamp()} [ARBITER] Command: arbiter request --ticket ${out.token}\n`);
-                                 return;
-                             }
-                             if (out.resource) process.stderr.write(`${getTimestamp()} [ARBITER] Granted Access to: ${out.resource}\n`);
-                             process.stderr.write(`${getTimestamp()} [ARBITER] Next: export the lease token below, then run your resource command.\n`);
-                             if (process.platform === 'win32') {
-                                 process.stdout.write(`:: Command Prompt\nSET ARBITER_LEASE_TOKEN=${out.token}\n`);
-                                 process.stdout.write(`# PowerShell\n$env:ARBITER_LEASE_TOKEN='${out.token}'\n`);
-                             } else {
-                                 process.stdout.write(`export ARBITER_LEASE_TOKEN=${out.token}\n`);
-                             }
-                         } else {
-                             process.stdout.write(d + "\n");
-                         }
-                     });
-                 });
-                 breq.on('error', (e: any) => {
-                     if (progressIv) clearInterval(progressIv);
-                     if (e.code === 'ECONNREFUSED') {
-                         process.stderr.write(`${getTimestamp()} [ARBITER] Could not connect to broker at ${BROKER_URL}. Is 'arbiter start' running?\n`);
-                     } else {
-                         process.stderr.write(`${getTimestamp()} [ARBITER] Broker request error: ${e.message}\n`);
-                     }
-                     process.exit(1);
-                 });
-                 breq.write(JSON.stringify({ 
+                 const res = await shimRequest<any>(`${BROKER_URL}/request`, { method: 'POST', timeout: 300000 }, { 
                     resource, 
                     duration_seconds, 
                     allow_conflict: conflict_accepted,
                     wait_mode: asyncMode ? 'ASYNC' : 'BLOCKING'
-                 }));
-                 breq.end();
+                 });
+
+                 if (progressIv) clearInterval(progressIv);
+
+                 if (res.error) {
+                     if (res.error === 'ECONNREFUSED' || res.error === 'TIMEOUT') {
+                         process.stderr.write(`${getTimestamp()} [ARBITER] Could not connect to broker at ${BROKER_URL}. Is 'arbiter start' running?\n`);
+                     } else {
+                         process.stderr.write(`${getTimestamp()} [ARBITER] Broker request error: ${res.error}\n`);
+                     }
+                     process.exit(1);
+                 }
+
+                 if (res.status === 409) {
+                     const parseW = res.data!;
+                     if (autoWait || asyncMode) {
+                         process.stderr.write(`${getTimestamp()} [ARBITER] Conflict detected: ${parseW.warning}\n`);
+                         process.stderr.write(`${getTimestamp()} [ARBITER] Next: queue safely and wait for your turn.\n`);
+                         makeReq(true);
+                     } else {
+                         process.stderr.write(`${getTimestamp()} [ARBITER] Conflict: ${parseW.warning}\n`);
+                         process.stderr.write(`${getTimestamp()} [ARBITER] Next: use '--wait' if this resource is needed now, or '--async' if you can continue other work first.\n`);
+                         process.exit(1);
+                     }
+                 } else if (res.status === 200 || res.status === 202) {
+                     const out = res.data!;
+                     if (res.status === 202) {
+                         process.stderr.write(`${getTimestamp()} [ARBITER] Async Reservation Created! Ticket ID: ${out.token}\n`);
+                         if (out.estimated_wait_seconds !== undefined) {
+                             const mins = Math.floor(out.estimated_wait_seconds / 60);
+                             const secs = out.estimated_wait_seconds % 60;
+                             process.stderr.write(`${getTimestamp()} [ARBITER] Estimated wait: ${mins}m ${secs}s\n`);
+                         }
+                         if (autoWait) {
+                             process.stderr.write(`${getTimestamp()} [ARBITER] Bounded wait threshold reached. Shifting to ticket polling...\n`);
+                             pollTicket(out.token);
+                             return;
+                         }
+                         process.stderr.write(`${getTimestamp()} [ARBITER] Next: continue non-device work, then claim when the resource is likely ready.\n`);
+                         process.stderr.write(`${getTimestamp()} [ARBITER] Command: arbiter request --ticket ${out.token}\n`);
+                         return;
+                     }
+                     if (out.resource) process.stderr.write(`${getTimestamp()} [ARBITER] Granted Access to: ${out.resource}\n`);
+                     process.stderr.write(`${getTimestamp()} [ARBITER] Next: export the lease token below, then run your resource command.\n`);
+                     if (process.platform === 'win32') {
+                         process.stdout.write(`:: Command Prompt\nSET ARBITER_LEASE_TOKEN=${out.token}\n`);
+                         process.stdout.write(`# PowerShell\n$env:ARBITER_LEASE_TOKEN='${out.token}'\n`);
+                     } else {
+                         process.stdout.write(`export ARBITER_LEASE_TOKEN=${out.token}\n`);
+                     }
+                 } else {
+                     process.stdout.write(JSON.stringify(res.data) + "\n");
+                 }
              };
              makeReq();
              return;
@@ -732,97 +752,85 @@ async function main() {
                       if (args[i] === '--resource') resource = args[++i];
                   }
                   
-                  const req = http.request(`${BROKER_URL}/api/permit/request`, { method: 'POST' }, (res) => {
-                     let d = ''; res.on('data', c => d += c);
-                     res.on('end', async () => {
-                         const permit = JSON.parse(d);
-                         if (permit.error) {
-                             if (permit.error === 'resource_not_leased') {
-                                 process.stderr.write(`${getTimestamp()} [ARBITER] Permit request failed: no compatible active owner lease is available.\n`);
-                                 process.stderr.write(`${getTimestamp()} [ARBITER] Next: request a full lease if you need direct resource access now.\n`);
-                             } else if (permit.error === 'permit_denied_late_session') {
-                                 process.stderr.write(`${getTimestamp()} [ARBITER] Permit request denied: the current lease is too close to expiry.\n`);
-                                 process.stderr.write(`${getTimestamp()} [ARBITER] Next: wait for the next lease owner or request a full lease later.\n`);
-                             } else {
-                                 process.stderr.write(`${getTimestamp()} [ARBITER] Permit request failed: ${permit.error}\n`);
-                                 process.stderr.write(`${getTimestamp()} [ARBITER] Next: request a full lease if this task still requires the resource.\n`);
-                             }
-                             return;
-                         }
-                         
-                         if (permit.status === 'GRANTED') {
-                             process.stdout.write(`${getTimestamp()} Auto-Granted Permit: Executing ${commands}\n`);
-                             process.stdout.write(`[ARBITER] Permit Token: ${permit.permit_token}\n`);
-                             process.stdout.write(`[ARBITER] Next: this one-time command will run now without taking the full lease.\n`);
-                             await executePermitCommand(commands, permit.permit_token);
-                             return;
-                         }
-                         
-                         process.stdout.write(`${getTimestamp()} Permit ${permit.id} is pending owner decision.\n`);
-                         process.stdout.write(`${getTimestamp()} Next: wait for the current lease owner to grant or deny this one-time request.\n`);
-                         const poll = setInterval(() => {
-                             http.get(`${BROKER_URL}/api/permit/status?resource=${resource}&id=${permit.id}`, (pres) => {
-                                 let pd = ''; pres.on('data', c => pd += c);
-                                 pres.on('end', async () => {
-                                     const pState = JSON.parse(pd);
-                                     if (pState.status === 'GRANTED') {
-                                         clearInterval(poll);
-                                         process.stdout.write(`${getTimestamp()} Owner Granted Permit! Executing ${commands}\n`);
-                                         process.stdout.write(`${getTimestamp()} Next: this one-time command will run now; no full lease request is needed.\n`);
-                                         await executePermitCommand(commands, pState.permit_token);
-                                         process.exit(0);
-                                     } else if (pState.status === 'DENIED') {
-                                         clearInterval(poll);
-                                         process.stderr.write(`${getTimestamp()} Owner denied the one-time permit request.\n`);
-                                         process.stderr.write(`${getTimestamp()} Next: request a full lease if the task still needs this resource.\n`);
-                                         process.exit(1);
-                                     }
-                                 });
-                             }).on('error', () => {
-                                 clearInterval(poll);
-                                 process.stderr.write(`${getTimestamp()} [ARBITER] Connection lost to broker during permit polling.\n`);
-                                 process.exit(1);
-                             });
-                         }, 2000);
-                         
-                         // Enforced 2m global timeout preventing deadlocks completely
-                         setTimeout(() => {
-                             clearInterval(poll);
-                             process.stderr.write(`${getTimestamp()} Permit request timed out while waiting for owner action.\n`);
-                             process.stderr.write(`${getTimestamp()} Next: retry the permit request later or request a full lease if the task is blocked.\n`);
-                             process.exit(1);
-                         }, 120000);
-                     });
-                  });
-                  req.on('error', () => {
+                  const res = await shimRequest<any>(`${BROKER_URL}/api/permit/request`, { method: 'POST' }, { resource, commands });
+                  if (res.error) {
                       process.stderr.write(`${getTimestamp()} [ARBITER] Could not connect to broker at ${BROKER_URL}. Is 'arbiter start' running?\n`);
                       process.exit(1);
-                  });
-                  req.write(JSON.stringify({ resource, commands })); req.end();
+                  }
+
+                  const permit = res.data!;
+                  if (permit.error) {
+                      if (permit.error === 'resource_not_leased') {
+                          process.stderr.write(`${getTimestamp()} [ARBITER] Permit request failed: no compatible active owner lease is available.\n`);
+                          process.stderr.write(`${getTimestamp()} [ARBITER] Next: request a full lease if you need direct resource access now.\n`);
+                      } else if (permit.error === 'permit_denied_late_session') {
+                          process.stderr.write(`${getTimestamp()} [ARBITER] Permit request denied: the current lease is too close to expiry.\n`);
+                          process.stderr.write(`${getTimestamp()} [ARBITER] Next: wait for the next lease owner or request a full lease later.\n`);
+                      } else {
+                          process.stderr.write(`${getTimestamp()} [ARBITER] Permit request failed: ${permit.error}\n`);
+                          process.stderr.write(`${getTimestamp()} [ARBITER] Next: request a full lease if this task still requires the resource.\n`);
+                      }
+                      return;
+                  }
+                  
+                  if (permit.status === 'GRANTED') {
+                      process.stdout.write(`${getTimestamp()} Auto-Granted Permit: Executing ${commands}\n`);
+                      process.stdout.write(`[ARBITER] Permit Token: ${permit.permit_token}\n`);
+                      process.stdout.write(`[ARBITER] Next: this one-time command will run now without taking the full lease.\n`);
+                      await executePermitCommand(commands, permit.permit_token);
+                      return;
+                  }
+                  
+                  process.stdout.write(`${getTimestamp()} Permit ${permit.id} is pending owner decision.\n`);
+                  process.stdout.write(`${getTimestamp()} Next: wait for the current lease owner to grant or deny this one-time request.\n`);
+                  const poll = setInterval(async () => {
+                      const pres = await shimRequest<any>(`${BROKER_URL}/api/permit/status?resource=${resource}&id=${permit.id}`, { method: 'GET' });
+                      if (pres.error) {
+                          clearInterval(poll);
+                          process.stderr.write(`${getTimestamp()} [ARBITER] Connection lost to broker during permit polling.\n`);
+                          process.exit(1);
+                      }
+                      const pState = pres.data!;
+                      if (pState.status === 'GRANTED') {
+                          clearInterval(poll);
+                          process.stdout.write(`${getTimestamp()} Owner Granted Permit! Executing ${commands}\n`);
+                          process.stdout.write(`${getTimestamp()} Next: this one-time command will run now; no full lease request is needed.\n`);
+                          await executePermitCommand(commands, pState.permit_token);
+                          process.exit(0);
+                      } else if (pState.status === 'DENIED') {
+                          clearInterval(poll);
+                          process.stderr.write(`${getTimestamp()} Owner denied the one-time permit request.\n`);
+                          process.stderr.write(`${getTimestamp()} Next: request a full lease if the task still needs this resource.\n`);
+                          process.exit(1);
+                      }
+                  }, 2000);
+                  
+                  // Enforced 2m global timeout preventing deadlocks completely
+                  setTimeout(() => {
+                      clearInterval(poll);
+                      process.stderr.write(`${getTimestamp()} Permit request timed out while waiting for owner action.\n`);
+                      process.stderr.write(`${getTimestamp()} Next: retry the permit request later or request a full lease if the task is blocked.\n`);
+                      process.exit(1);
+                  }, 120000);
                   return;
              } else if (args[1] === 'resolve') {
                   const permitId = args[2];
                   const grantMode = args[3] === 'grant';
-                  const req = http.request(`${BROKER_URL}/api/permit/resolve`, { method: 'POST' }, (res) => {
-                      let d = ''; res.on('data', c => d += c);
-                      res.on('end', () => {
-                           if (res.statusCode === 200) {
-                               const out = JSON.parse(d);
-                               process.stdout.write("Permit resolution recorded successfully.\n");
-                               if (out.permit_token) {
-                                   process.stdout.write(`[ARBITER] Permit Token: ${out.permit_token}\n`);
-                                   process.stdout.write(`[ARBITER] Next: the requesting agent may now execute its one-time command with that token.\n`);
-                               }
-                           } else {
-                               process.stdout.write("Resolution error. The permit may be invalid or you may not be authorized.\n");
-                           }
-                      });
-                  });
-                  req.on('error', () => {
+                  const res = await shimRequest<any>(`${BROKER_URL}/api/permit/resolve`, { method: 'POST' }, { token, permit_id: permitId, grant: grantMode });
+                  if (res.error) {
                       process.stderr.write(`${getTimestamp()} [ARBITER] Could not connect to broker at ${BROKER_URL}. Is 'arbiter start' running?\n`);
                       process.exit(1);
-                  });
-                  req.write(JSON.stringify({ token, permit_id: permitId, grant: grantMode })); req.end();
+                  }
+                  if (res.status === 200) {
+                      const out = res.data!;
+                      process.stdout.write("Permit resolution recorded successfully.\n");
+                      if (out.permit_token) {
+                          process.stdout.write(`[ARBITER] Permit Token: ${out.permit_token}\n`);
+                          process.stdout.write(`[ARBITER] Next: the requesting agent may now execute its one-time command with that token.\n`);
+                      }
+                  } else {
+                      process.stdout.write("Resolution error. The permit may be invalid or you may not be authorized.\n");
+                  }
                   return;
              }
         }
@@ -1145,22 +1153,15 @@ async function main() {
     let leaseLost = false;
     
     // Heartbeat Interval to prevent Crash Detection force-yields
-    const sendHeartbeat = () => {
+    const sendHeartbeat = async () => {
         if (leaseLost) return;
-        const req = http.request(`${BROKER_URL}/api/lease/heartbeat`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' }
-        }, (res) => {
-            if (res.statusCode === 404) {
-                leaseLost = true;
-                clearInterval(hb);
-                process.stderr.write(`\n${getTimestamp()} [ARBITER] WARNING: Lease has been reclaimed by Broker (Timeout exceeded).\n`);
-                process.stderr.write(`${getTimestamp()} [ARBITER] Action: Continuing execution natively, but results may be inconsistent due to lost exclusivity.\n`);
-            }
-        });
-        req.write(JSON.stringify({ token }));
-        req.on('error', () => {});
-        req.end();
+        const res = await shimRequest(`${BROKER_URL}/api/lease/heartbeat`, { method: 'POST' }, { token });
+        if (res.status === 404) {
+            leaseLost = true;
+            clearInterval(hb);
+            process.stderr.write(`\n${getTimestamp()} [ARBITER] WARNING: Lease has been reclaimed by Broker (Timeout exceeded).\n`);
+            process.stderr.write(`${getTimestamp()} [ARBITER] Action: Continuing execution natively, but results may be inconsistent due to lost exclusivity.\n`);
+        }
     };
     
     sendHeartbeat(); // send initial heartbeat!
@@ -1198,14 +1199,8 @@ async function main() {
     }
 
     // Async Notify-Before-Exec wrapper
-    const notifyReq = http.request(`${BROKER_URL}/api/session/command`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, timeout: 500 }, () => {});
-    notifyReq.on('error', () => {});
-    notifyReq.write(JSON.stringify({ token, command: caller, args, apk_hash }));
-    notifyReq.end();
+    await shimRequest(`${BROKER_URL}/api/session/command`, { method: 'POST', timeout: 500 }, { token, command: caller, args, apk_hash });
     
-    // Flush socket natively safely accommodating loaded CI
-    await new Promise(r => setTimeout(r, 100));
-
     const t0 = Date.now();
     const realBinParts = realBin.split(' ');
 
@@ -1226,33 +1221,36 @@ async function main() {
     const { spawn } = require('child_process');
     const child = spawn(realBinParts[0], [...realBinParts.slice(1), ...args], {
         stdio: 'inherit',
-        env: process.env
+        env: process.env,
+        detached: process.platform !== 'win32'
     });
 
     let killed = false;
     if (timeoutMs) {
-        setTimeout(() => {
+        setTimeout(async () => {
             if (!killed) {
-                child.kill();
+                if (process.platform === 'win32') {
+                    spawnSync('taskkill', ['/pid', child.pid, '/f', '/t']);
+                } else {
+                    try { process.kill(-child.pid, 'SIGKILL'); } catch (e) {}
+                }
                 killed = true;
-                process.stderr.write(`\n${getTimestamp()} [ARBITER] Command timeout after ${timeoutSecs}s. Lease is still active.\n`);
-                process.stderr.write(`${getTimestamp()} [ARBITER] Next: inspect device state, then either retry, extend, or release when safe.\n`);
+                process.stderr.write(`\n${getTimestamp()} [ARBITER] Command timeout after ${timeoutSecs}s. Releasing lease due to hard timeout.\n`);
+                
+                await shimRequest(`${BROKER_URL}/api/lease/release`, { method: 'POST' }, { token, reason: 'hard_timeout' });
                 process.exit(-1);
             }
         }, timeoutMs);
     }
 
     child.on('close', async (code: number) => {
+        if (killed) return;
         const duration_ms = Date.now() - t0;
         clearInterval(hb);
 
         if (code === 0) {
             // Fire and forget anonymous duration metric (Analytics Engine)
-            const req = http.request(`${BROKER_URL}/api/stat/duration`, { method: 'POST', headers: { 'Content-Type': 'application/json' }});
-            req.on('error', () => {});
-            req.write(JSON.stringify({ token, command: `${caller} ${args.join(' ')}`, duration_ms }));
-            req.end();
-            await new Promise(r => setTimeout(r, 100));
+            await shimRequest(`${BROKER_URL}/api/stat/duration`, { method: 'POST' }, { token, command: `${caller} ${args.join(' ')}`, duration_ms });
         }
         
         if (leaseLost) {
