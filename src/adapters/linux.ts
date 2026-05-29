@@ -1,7 +1,8 @@
 import { Adapter, AdapterConfig } from './types';
-import { spawnSync } from 'child_process';
 import * as path from 'path';
 import * as os from 'os';
+import * as fs from 'fs';
+import { boundedExec } from './utils';
 
 export class LinuxAdapter implements Adapter {
     private config!: AdapterConfig;
@@ -10,8 +11,7 @@ export class LinuxAdapter implements Adapter {
 
     async execute(args: string[]): Promise<{ stdout: string; stderr: string; exitCode: number; }> {
         // e.g. xdotool windowactivate
-        const res = spawnSync('xdotool', [...args], { encoding: 'utf-8' });
-        return { stdout: res.stdout, stderr: res.stderr, exitCode: res.status ?? 1 };
+        return await boundedExec('xdotool', args);
     }
 
     async stream(args: string[], onData: (data: string) => void): Promise<void> {}
@@ -19,7 +19,7 @@ export class LinuxAdapter implements Adapter {
     async screenshot(): Promise<string> {
         const ts = new Date().getTime();
         const localPath = path.join(os.tmpdir(), `arbiter_linux_${ts}.png`);
-        spawnSync('scrot', [localPath]);
+        await boundedExec('scrot', [localPath]);
         return localPath;
     }
 
@@ -27,9 +27,8 @@ export class LinuxAdapter implements Adapter {
         // Retrieve dmesg or syslog tail for desktop sessions
         const ts = new Date().getTime();
         const localPath = path.join(os.tmpdir(), `arbiter_linux_log_${ts}.txt`);
-        const res = spawnSync('dmesg', ['--level=err,warn', '-T', '|', 'tail', '-n', '100'], { encoding: 'utf-8', shell: true });
+        const res = await boundedExec('dmesg', ['--level=err,warn', '-T', '|', 'tail', '-n', '100'], { shell: true });
         if (res.stdout) {
-            const fs = require('fs');
             fs.writeFileSync(localPath, res.stdout);
         }
         return localPath;

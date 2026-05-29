@@ -61,7 +61,7 @@ export class JsonTestRunner {
             try {
                 if (step.background) {
                     const p = this.executeStep(step).catch(e => {
-                        // Background tasks often violently disconnect during test teardowns. Safe to ignore.
+                        this.backgroundErrors.push(`Step ${index + 1} background error: ${e.message}`);
                     });
                     this.pendingPromises.push(p);
                 } else {
@@ -71,14 +71,19 @@ export class JsonTestRunner {
                 throw new Error(`Step ${index + 1} (${step.action}) failed: ${e.message}`);
             }
         }
+        if (this.backgroundErrors.length > 0) {
+            throw new Error(`Test finished with background errors:\n${this.backgroundErrors.join('\n')}`);
+        }
     }
+
+    private backgroundErrors: string[] = [];
 
     private async executeStep(step: TestStep) {
         const targetResource = step.resourceSuffix ? `${this.resource}-${step.resourceSuffix}` : this.resource;
         
         switch (step.action) {
             case 'request':
-                const waitMode = step.async ? 'ASYNC' : undefined;
+                let waitMode = step.async ? 'ASYNC' : (step.wait ? 'BLOCKING' : undefined);
                 const reqRes = await brokerRequest(this.port, '/request', {
                     resource: targetResource,
                     duration_seconds: step.duration || 60,

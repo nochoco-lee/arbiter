@@ -41,7 +41,8 @@ function getAverageDuration(resource: string, command: string): number | null {
 }
 
 import { ConfigManager } from '../config/index';
-import { log, warn, logBuffer, sseClients } from './logger';
+import { ContextManager } from '../context/index';
+import { log, warn, logBuffer, sseClients, debug } from './logger';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -62,37 +63,81 @@ function resolveRemoteBin(resource: string): string {
     return defaults[resource] || `/usr/bin/${resource}`;
 }
 
-function readJsonBody<T>(req: http.IncomingMessage): Promise<T> {
+function readJsonBody<T>(req: http.IncomingMessage, maxBytes: number = 1024 * 1024): Promise<T> {
     return new Promise((resolve, reject) => {
         let body = '';
-        req.on('data', chunk => body += chunk.toString());
-        req.on('end', () => {
+        let bytesReceived = 0;
+        
+        const timeout = setTimeout(() => {
+            cleanup();
+            req.destroy();
+            reject(new Error('Request body timeout'));
+        }, 10000);
+
+        const onData = (chunk: Buffer) => {
+            bytesReceived += chunk.length;
+            if (bytesReceived > maxBytes) {
+                cleanup();
+                req.destroy();
+                reject(new Error('Request body too large'));
+                return;
+            }
+            body += chunk.toString();
+        };
+
+        const onAborted = () => {
+            cleanup();
+            reject(new Error('Request aborted'));
+        };
+
+        const onEnd = () => {
+            cleanup();
             try {
                 resolve(JSON.parse(body || '{}'));
             } catch (e) {
                 reject(e);
             }
-        });
+        };
+
+        const onError = (err: Error) => {
+            cleanup();
+            reject(err);
+        };
+
+        const cleanup = () => {
+            clearTimeout(timeout);
+            req.off('data', onData);
+            req.off('aborted', onAborted);
+            req.off('end', onEnd);
+            req.off('error', onError);
+        };
+
+        req.on('data', onData);
+        req.on('aborted', onAborted);
+        req.on('end', onEnd);
+        req.on('error', onError);
     });
 }
 
 const LOG_BUFFER_SIZE = 500;
 
-export const startBroker = () => {
+export const startBroker = (options: { resume?: boolean } = {}) => {
   leaseManager.experimentalScheduling = true;
   queueManager.experimentalScheduling = true;
 
   const stateFile = path.join(process.env.ARBITER_CONTEXT_DIR || process.cwd(), '.arbiter_broker_state.json');
-  try {
-      if (fs.existsSync(stateFile)) {
-          const raw = fs.readFileSync(stateFile, 'utf8');
-          const data = JSON.parse(raw);
-          leaseManager.importState(data.leaseManager || {});
-          queueManager.importState(data.queueManager || {});
-          log(`[Broker] Restored previous broker state from ${stateFile}`);
+  if (options.resume) {
+      try {
+          if (fs.existsSync(stateFile)) {
+              const raw = fs.readFileSync(stateFile, 'utf8');
+              const data = JSON.parse(raw);
+              leaseManager.importState(data.leaseManager || {});
+              queueManager.importState(data.queueManager || {});
+              log(`[Broker] Restored previous broker state from ${stateFile}`);
+          }
+      } catch (e) {
+          warn(`[Broker] Failed to restore state: ${e}`);
       }
-  } catch (e) {
-      warn(`[Broker] Failed to restore state: ${e}`);
   }
 
   setInterval(() => {
@@ -125,12 +170,19 @@ export const startBroker = () => {
   // Dependency Injection for circular dependency avoidance
   leaseManager.queueDepthResolver = (res: string) => queueManager.getQueueDepth(res);
   leaseManager.onResourceFree = (res: string) => queueManager.pump(res);
+  leaseManager.globalConfig = globalConfig;
 
   try {
       leaseManager.ceilingConfig = globalConfig.resources || {};
       log(`[Broker] Loaded Global Ceiling configurations natively.`);
+      
+      const defLease = globalConfig.default_lease_seconds || 300;
+      const maxLease = globalConfig.max_lease_seconds || globalConfig.global_ceiling_seconds || 'unlimited';
+      const hbTimeout = globalConfig.heartbeat_timeout_seconds || 15;
+      
+      log(`[Broker] Effective Global Defaults: default_lease=${defLease}s, max_lease=${maxLease}s, heartbeat_timeout=${hbTimeout}s`);
   } catch(e: any) {
-      log(`[Broker] Notice: No explicit arbiter.yaml mapped. Skipping Ceiling overrides.`);
+      log(`[Broker] Notice: No explicit arbiter.yaml mapped. Using internal defaults.`);
   }
 
   const server = http.createServer(async (req: http.IncomingMessage, res: http.ServerResponse) => {
@@ -159,7 +211,7 @@ export const startBroker = () => {
                     let installAvg = getAverageDuration(resource || '', 'adb install') || 30; // fallback to 30s
                     let estimates = { 'install': installAvg };
 
-                    const statusResp: any = { valid: true, expires_at: expires, queueDepth: depth, estimates, pending_permits: pending };
+                    const statusResp: any = { valid: true, resource: resource, expires_at: expires, queueDepth: depth, estimates, pending_permits: pending };
                     
                     // Check if it's a permit token specifically
                     const permit = leaseManager.getPermitsForResource(resource || '')?.[token];
@@ -195,8 +247,9 @@ export const startBroker = () => {
                     res.writeHead(200);
                     res.end(JSON.stringify(statusResp));
                 } else {
+                    const status = leaseManager.getTokenStatus(token);
                     res.writeHead(401);
-                    res.end(JSON.stringify({ valid: false }));
+                    res.end(JSON.stringify({ valid: false, message: status.message }));
                 }
                 return;
             }
@@ -268,6 +321,7 @@ export const startBroker = () => {
             }
 
             log(`[Broker] Incoming Request: resource=${body.resource}, duration=${body.duration_seconds || 'default'}`);
+            debug(`[Broker] Request body: ${JSON.stringify(body)}`);
             
             const ADAPTER_KEYWORDS = ['auto', 'adb', 'android', 'sdb', 'simctl', 'windows', 'macos', 'linux'];
             // If requested resource matches a known generic adapter/auto keyword natively, AND it is not explicitly registered as an exact string literal in ceilingConfig...
@@ -309,8 +363,23 @@ export const startBroker = () => {
                 log(`[Broker] Resource ${body.resource} busy (${currentState}). Enqueuing requester...`);
             }
 
-            // Experimental Scheduling: Upfront auto-shift has been disabled to respect explicit --wait intents.
-            // We now rely on the Dynamic Async Shift (3-minute watchdog) to handle actual wait durations.
+            // Bounded Blocking: If the request is expected to wait longer than the threshold, 
+            // we return 202 RESERVED immediately if it's not granted right away.
+            const thresholdWaitMs = parseInt(process.env.ARBITER_TICKET_THRESHOLD_WAIT || '180') * 1000;
+            const estimatedWait = queueManager.getEstimatedWait(body.resource) * 1000;
+            
+            // Compatibility for older API callers: default allow_conflict to BLOCKING
+            if (body.allow_conflict && !body.wait_mode) {
+                body.wait_mode = 'BLOCKING';
+            }
+
+            if (estimatedWait > thresholdWaitMs && body.wait_mode !== 'BLOCKING' && currentState !== 'FREE' && currentState !== 'AVAILABLE') {
+                // If the user didn't EXPLICITLY ask for BLOCKING, and it's going to be long,
+                // and the resource isn't immediately ready to be grabbed (preempted),
+                // we treat it as ASYNC to be safe and avoid HTTP timeouts.
+                body.wait_mode = 'ASYNC';
+            }
+
             const token = await queueManager.enqueue(body as unknown as LeaseRequest);
             const actualResource = leaseManager.getResourceByToken(token) || body.resource;
             const state_snapshot = stateSnapshots[actualResource] || {};
@@ -319,12 +388,18 @@ export const startBroker = () => {
 
             if ((body.wait_mode === 'ASYNC' || isTicket) && !leaseManager.getResourceByToken(token)) {
                 // If it's async or dynamically shifted, and not immediately granted
+                const estWait = queueManager.getEstimatedWait(actualResource);
                 res.writeHead(202);
                 res.end(JSON.stringify({ 
                     token, 
                     resource: actualResource, 
                     status: 'RESERVED',
-                    estimated_wait_seconds: queueManager.getEstimatedWait(actualResource)
+                    estimated_wait_seconds: estWait,
+                    wait_deadline_ms: Date.now() + (estWait * 1000),
+                    diagnostics: {
+                        queue_depth: queueManager.getQueueDepth(actualResource),
+                        resource_state: leaseManager.getResourceState(actualResource)
+                    }
                 }));
                 return;
             }
@@ -358,9 +433,15 @@ export const startBroker = () => {
             if (!body.token) return res.writeHead(400).end();
             const resource = leaseManager.getResourceByToken(body.token);
             const yielded = await leaseManager.releaseLease(body.token);
+            const release_state = resource ? leaseManager.getResourceState(resource) : 'UNKNOWN';
             log(`[Broker] Lease RELEASED: resource=${resource || 'unknown'}, yielded=${yielded}`);
             res.writeHead(200);
-            return res.end(JSON.stringify({ yielded }));
+            return res.end(JSON.stringify({ 
+                yielded, 
+                artifacts_pending: true,
+                release_state,
+                transition_reason: body.msg || 'release'
+            }));
         }
 
         if (req.method === 'POST' && path === '/api/permit/request') {
@@ -411,21 +492,33 @@ export const startBroker = () => {
         // --- Reservation Tickets (Milestone 3) ---
         if (req.method === 'POST' && path === '/api/reservation/claim') {
             const body = await readJsonBody<{ticketId: string}>(req);
+            debug(`[Broker] Claiming ticket: ${body.ticketId}`);
             const { token, error } = await queueManager.claimTicket(body.ticketId);
             if (token) {
                 const resource = leaseManager.getResourceByToken(token);
                 if (!resource) {
                     // Token doesn't map to an active lease — defence against leaked ticket IDs
                     log(`[Broker] Claim returned token ${token.substring(0, 8)}... but it has no active lease. Rejecting as ticket_still_waiting.`);
+                    debug(`[Broker] Claimed token ${token} has no active lease mapping.`);
                     res.writeHead(400);
                     res.end(JSON.stringify({ error: 'ticket_still_waiting' }));
                     return;
                 }
+                debug(`[Broker] Ticket ${body.ticketId} claimed successfully: ${token}`);
                 res.writeHead(200);
                 res.end(JSON.stringify({ token, resource }));
             } else {
+                debug(`[Broker] Ticket claim failed: ${error}`);
                 res.writeHead(400);
-                res.end(JSON.stringify({ error: error || 'ticket_invalid' }));
+                const ticketStatus = queueManager.getTicketStatus(body.ticketId);
+                res.end(JSON.stringify({ 
+                    error: error || 'ticket_invalid',
+                    diagnostics: ticketStatus ? {
+                        position: ticketStatus.position,
+                        estimated_wait_seconds: ticketStatus.estimated_wait_seconds,
+                        resource_state: leaseManager.getResourceState(ticketStatus.resource)
+                    } : undefined
+                }));
             }
             return;
         }
@@ -436,7 +529,13 @@ export const startBroker = () => {
             const status = queueManager.getTicketStatus(ticketId);
             if (status) {
                 res.writeHead(200);
-                res.end(JSON.stringify(status));
+                res.end(JSON.stringify({
+                    ...status,
+                    wait_deadline_ms: status.claim_deadline || (Date.now() + (status.estimated_wait_seconds * 1000)),
+                    diagnostics: {
+                        resource_state: leaseManager.getResourceState(status.resource)
+                    }
+                }));
             } else {
                 res.writeHead(404);
                 res.end(JSON.stringify({ error: 'ticket_not_found' }));
@@ -493,6 +592,11 @@ export const startBroker = () => {
                             installed_at: new Date().toISOString(),
                             apk_hash: body.apk_hash
                         };
+                        // Cap recorded packages to prevent memory leak
+                        const pkgs = Object.keys(stateSnapshots[resource].installed_packages);
+                        if (pkgs.length > 50) {
+                            delete stateSnapshots[resource].installed_packages[pkgs[0]];
+                        }
                     }
                 } else if (fullCmd.includes('setprop') || fullCmd.includes('settings put')) {
                     stateSnapshots[resource].config_changes.push({
@@ -500,6 +604,9 @@ export const startBroker = () => {
                          changed_at: new Date().toISOString(),
                          command: fullCmd
                     });
+                    if (stateSnapshots[resource].config_changes.length > 50) {
+                        stateSnapshots[resource].config_changes.shift();
+                    }
                 }
             }
             // Notify Mode is strictly async, unblocking
@@ -544,10 +651,12 @@ export const startBroker = () => {
                 // Track both exact command AND generic pattern
                 if (!durationHistory[resource][fullCmd]) durationHistory[resource][fullCmd] = [];
                 durationHistory[resource][fullCmd].push(body.duration_ms);
+                if (durationHistory[resource][fullCmd].length > 20) durationHistory[resource][fullCmd].shift();
 
                 if (fullCmd !== pattern) {
                     if (!durationHistory[resource][pattern]) durationHistory[resource][pattern] = [];
                     durationHistory[resource][pattern].push(body.duration_ms);
+                    if (durationHistory[resource][pattern].length > 20) durationHistory[resource][pattern].shift();
                 }
             }
             res.writeHead(202).end(); // Fire and forget Accepted
@@ -593,6 +702,7 @@ export const startBroker = () => {
                 return res.end(JSON.stringify({ error: 'unauthorized_token' }));
             }
             
+            leaseManager.touchActivity(body.token);
             const adapter = await leaseManager.getAdapter(resource);
             try {
                 // Execute natively on the host's actual binary mapping
@@ -612,17 +722,34 @@ export const startBroker = () => {
                 res.writeHead(400);
                 return res.end(JSON.stringify({ error: 'missing_token' }));
             }
+            const resource = leaseManager.getResourceByToken(body.token);
             const success = await leaseManager.yieldLease(body);
+            const release_state = resource ? leaseManager.getResourceState(resource) : 'UNKNOWN';
             
             // Kick the queue for all empty resources
             queueManager.pump('*'); 
 
             res.writeHead(success ? 200 : 400);
-            res.end(JSON.stringify({ success }));
+            res.end(JSON.stringify({ 
+                success, 
+                artifacts_pending: true,
+                release_state,
+                transition_reason: body.reason || 'yielded'
+            }));
             return;
         }
 
-        // --- Log Endpoints ---
+        if (req.method === 'GET' && path === '/api/context') {
+            const resource = urlObj.searchParams.get('resource');
+            if (!resource) {
+                res.writeHead(400);
+                return res.end(JSON.stringify({ error: 'missing_resource' }));
+            }
+            const ctx = ContextManager.loadLastContext(resource);
+            res.writeHead(ctx ? 200 : 404);
+            return res.end(JSON.stringify(ctx || { error: 'no_context_found' }));
+        }
+
         if (req.method === 'GET' && path === '/api/logs') {
             const limitParam = urlObj.searchParams.get('limit');
             const limit = Math.min(parseInt(limitParam || '200', 10), LOG_BUFFER_SIZE);
@@ -670,6 +797,11 @@ export const startBroker = () => {
           let msg: any;
           try { msg = JSON.parse(raw.toString()); } catch { return; }
 
+          if (msg.type === 'heartbeat' && execToken) {
+              leaseManager.touchHeartbeat(execToken);
+              return;
+          }
+
           if (msg.type === 'exec') {
               // Validate token
               if (!leaseManager.validateToken(msg.token)) {
@@ -678,8 +810,7 @@ export const startBroker = () => {
                   return;
               }
               execToken = msg.token as string;
-              leaseManager.touchHeartbeat(execToken); // Phase 2: keep lease alive
-
+              leaseManager.touchHeartbeat(execToken); // keep lease alive
 
               const binPath = resolveRemoteBin(msg.resource || '');
               const binParts = binPath.split(' ');
@@ -690,6 +821,16 @@ export const startBroker = () => {
                   env: process.env
               });
 
+              // Bounded Execution: Timeout & Escalation
+              const timeoutMs = 3600000; // 1 hour default for remote long-running tasks
+              const timer = setTimeout(() => {
+                  if (child && !child.killed) {
+                      log(`[Remote] Force-killing long-running command on ${msg.resource}`);
+                      child.kill('SIGTERM');
+                      setTimeout(() => { if (child && !child.killed) child.kill('SIGKILL'); }, 2000).unref();
+                  }
+              }, timeoutMs);
+
               child.stdout!.on('data', (d: Buffer) => {
                   if (ws.readyState === WebSocket.OPEN)
                       ws.send(JSON.stringify({ type: 'stdout', data: d.toString('base64') }));
@@ -699,6 +840,7 @@ export const startBroker = () => {
                       ws.send(JSON.stringify({ type: 'stderr', data: d.toString('base64') }));
               });
               child.on('exit', (code) => {
+                  clearTimeout(timer);
                   log(`[Remote] exec exited with code ${code}`);
                   if (ws.readyState === WebSocket.OPEN) {
                       ws.send(JSON.stringify({ type: 'exit', code: code ?? -1 }));
@@ -706,6 +848,7 @@ export const startBroker = () => {
                   }
               });
               child.on('error', (e: Error) => {
+                  clearTimeout(timer);
                   ws.send(JSON.stringify({ type: 'error', message: `spawn failed: ${e.message}` }));
                   ws.close(1011);
               });
@@ -770,5 +913,8 @@ export const startBroker = () => {
 };
 
 if (require.main === module) {
-  startBroker();
+  const resume = process.argv.includes('--resume') || process.argv.includes('-r');
+  const debugMode = process.argv.includes('--debug') || process.argv.includes('-d');
+  if (debugMode) process.env.ARBITER_DEBUG = 'true';
+  startBroker({ resume });
 }

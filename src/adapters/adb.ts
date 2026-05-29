@@ -1,8 +1,9 @@
 import { Adapter, AdapterConfig } from './types';
-import { spawn, spawnSync } from 'child_process';
+import { spawn } from 'child_process';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
+import { boundedExec } from './utils';
 
 export class AdbAdapter implements Adapter {
     private config!: AdapterConfig;
@@ -21,22 +22,15 @@ export class AdbAdapter implements Adapter {
 
         // Wait for device
         const args = config.serial ? ['-s', config.serial, 'wait-for-device'] : ['wait-for-device'];
-        const binParts = this.adbPath.split(' ');
-        const res = spawnSync(binParts[0], [...binParts.slice(1), ...args]);
-        if (res.error || res.status !== 0) {
-            throw new Error(`Failed to connect to ADB device: ${res.stderr?.toString()}`);
+        const res = await boundedExec(this.adbPath, args, { timeoutMs: 30000 });
+        if (res.exitCode !== 0) {
+            throw new Error(`Failed to connect to ADB device: ${res.stderr}`);
         }
     }
 
     async execute(args: string[]): Promise<{ stdout: string; stderr: string; exitCode: number; }> {
         const fullArgs = this.config.serial ? ['-s', this.config.serial, ...args] : [...args];
-        const binParts = this.adbPath.split(' ');
-        const res = spawnSync(binParts[0], [...binParts.slice(1), ...fullArgs], { encoding: 'utf-8' });
-        return {
-            stdout: res.stdout || '',
-            stderr: res.stderr || '',
-            exitCode: res.status ?? 1
-        };
+        return await boundedExec(this.adbPath, fullArgs);
     }
 
     async stream(args: string[], onData: (data: string) => void): Promise<void> {

@@ -17,15 +17,34 @@ function pushLog(line: string) {
         try { 
             client.write(`data: ${JSON.stringify(line)}\n\n`); 
         } catch (_) {
-            // Client likely disconnected
+            sseClients.delete(client);
         }
     }
 }
+
+// Periodic SSE Keepalive to prevent intermediary timeouts
+setInterval(() => {
+    for (const client of sseClients) {
+        try {
+            client.write(`: keepalive\n\n`);
+        } catch (_) {
+            sseClients.delete(client);
+        }
+    }
+}, 30000).unref();
 
 export function log(msg: string) {
     const line = `${getTimestamp()} ${msg}`;
     process.stdout.write(line + '\n');
     pushLog(line);
+}
+
+export function debug(msg: string) {
+    if (process.env.ARBITER_DEBUG === 'true') {
+        const line = `${getTimestamp()} [DEBUG] ${msg}`;
+        process.stdout.write(line + '\n');
+        pushLog(line);
+    }
 }
 
 export function warn(msg: string) {

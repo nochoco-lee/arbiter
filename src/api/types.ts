@@ -1,3 +1,18 @@
+export interface ArbiterContext {
+    schema_version: number;
+    resource: string;
+    session_id: string;
+    agent_id?: string;
+    duration_seconds: number;
+    outcome: string;
+    hypothesis?: string;
+    findings?: string;
+    suggested_next?: string;
+    commands_run?: number;
+    last_log_tail?: string;
+    artifacts: string[];
+}
+
 export interface LeaseRequest {
   resource: string;
   duration_seconds?: number;
@@ -12,24 +27,27 @@ export interface LeaseResponse {
 
 export interface YieldRequest {
   token: string;
-  reason?: 'complete' | 'stuck' | 'hypothesis-exhausted' | 'yielding-to-queue' | 'agent_crashed' | 'hard_timeout' | 'release' | 'expired_contention' | 'zombie_timeout';
-  context?: any;
+  reason?: 'complete' | 'stuck' | 'hypothesis-exhausted' | 'yielding-to-queue' | 'agent_crashed' | 'hard_timeout' | 'release' | 'expired_contention' | 'zombie_timeout' | 'inactivity_timeout';
+  context?: ArbiterContext;
 }
 
 export type ResourceState = 'FREE' | 'REQUESTED' | 'GRANTED' | 'EXPIRING' | 'RELEASED' | 'AVAILABLE' | 'DRAINING';
 
 export interface StatusResponse {
+  resource: string;
   state: ResourceState;
-  holder?: string;
-  expires_at?: number;
   queueDepth: number;
-  // Scheduling Metadata
-  headType?: 'BLOCKING_WAIT' | 'RESERVATION' | 'READY' | null;
   holderAgeSeconds?: number;
+  headType?: 'LEADER' | 'FOLLOWER' | 'WAITING';
   drainingActivePermitCount?: number;
 }
 
-export interface PermitRequestInfo {
+export interface PermitRequest {
+  resource: string;
+  commands: string;
+}
+
+export interface PermitResponse {
   id: string;
   resource: string;
   commands: string;
