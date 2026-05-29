@@ -150,6 +150,7 @@ export const startBroker = (options: { resume?: boolean } = {}) => {
           fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
       } catch (e) {
           warn(`[Broker] State serialization failed: ${e}`);
+          leaseManager.persistenceErrors++;
       }
   }, 5000);
 
@@ -191,6 +192,22 @@ export const startBroker = (options: { resume?: boolean } = {}) => {
     try {
         const urlObj = new URL(req.url || '/', `http://${req.headers.host}`);
         const path = urlObj.pathname;
+
+        if (req.method === 'GET' && path === '/healthz') {
+            const leaseDiag = leaseManager.getDiagnostics();
+            const queueDiag = queueManager.getDiagnostics();
+            const isHealthy = (Date.now() - leaseDiag.lastWatchdogRun < 30000) && 
+                              (Date.now() - queueDiag.lastWatchdogRun < 30000);
+            
+            res.writeHead(isHealthy ? 200 : 503);
+            res.end(JSON.stringify({
+                status: isHealthy ? 'healthy' : 'degraded',
+                timestamp: Date.now(),
+                lease_watchdog: leaseDiag,
+                queue_watchdog: queueDiag
+            }));
+            return;
+        }
 
         if (req.method === 'GET' && path === '/status') {
             const authHeader = req.headers['authorization'];
@@ -268,9 +285,11 @@ export const startBroker = (options: { resume?: boolean } = {}) => {
                 if (leaseManager.experimentalScheduling) {
                     const activeLease = leaseManager.getActiveLeaseInfo(resource);
                     response.headType = queueManager.getHeadType(resource);
-                    response.drainingActivePermitCount = leaseManager.getDrainingPermitCount(resource);
+                    response.drainingPermitCount = leaseManager.getDrainingPermitCount(resource);
+                    response.oldestQueueAgeMs = queueManager.getOldestWaitTime(resource);
                     if (activeLease) {
                         response.holderAgeSeconds = Math.round((Date.now() - (activeLease.expires_at - activeLease.requested_duration_ms)) / 1000);
+                        response.lastTransitionReason = activeLease.last_transition_reason;
                     }
                 }
 
@@ -281,18 +300,37 @@ export const startBroker = (options: { resume?: boolean } = {}) => {
 
             // Global Status (All resources)
             const resources = leaseManager.getAllResources();
-            const response: any = { resources: {} };
+            const response: any = { 
+                resources: {},
+                diagnostics: {
+                    lease: leaseManager.getDiagnostics(),
+                    queue: queueManager.getDiagnostics()
+                }
+            };
             for (const r of resources) {
                 response.resources[r] = {
                     state: leaseManager.getResourceState(r),
                     queueDepth: queueManager.getQueueDepth(r),
                     headType: queueManager.getHeadType(r),
-                    drainingActivePermitCount: leaseManager.getDrainingPermitCount(r)
+                    drainingPermitCount: leaseManager.getDrainingPermitCount(r)
                 };
             }
             res.writeHead(200);
             res.end(JSON.stringify(response));
             return;
+        }
+
+        if (req.method === 'GET' && path === '/api/diagnostics/stuck') {
+            const resource = urlObj.searchParams.get('resource');
+            if (!resource) {
+                const resources = leaseManager.getAllResources();
+                const stuck = resources.map(r => leaseManager.getStuckResourceInfo(r)).filter(i => i !== null);
+                res.writeHead(200);
+                return res.end(JSON.stringify({ stuck }));
+            }
+            const info = leaseManager.getStuckResourceInfo(resource);
+            res.writeHead(info ? 200 : 404);
+            return res.end(JSON.stringify(info || { error: 'not_found' }));
         }
 
         if (req.method === 'POST' && path === '/api/lease/heartbeat') {

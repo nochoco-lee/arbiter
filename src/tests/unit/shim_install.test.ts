@@ -15,7 +15,7 @@ test('Shim Install: Cross-Platform Wrapper Generation', (t) => {
     const shimScriptPath = path.resolve(__dirname, '../../shim/index.ts');
     
     // We run it natively via ts-node so we don't depend on dist being up to date
-    const tsNodeBin = path.resolve('node_modules/ts-node/dist/bin.js');
+    const tsNodeBin = require.resolve('ts-node/dist/bin.js');
     
     const res = spawnSync('node', [tsNodeBin, shimScriptPath, '--arbiter-install', tmpDir, testBinName], {
         encoding: 'utf8'

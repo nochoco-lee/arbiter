@@ -17,6 +17,7 @@ export interface LeaseInfo {
   state: 'GRANTED' | 'EXPIRING' | 'EXPIRED' | 'AVAILABLE' | 'DRAINING';
   extended?: boolean;
   requested_duration_ms: number;
+  last_transition_reason?: string;
 }
 
 export interface DeadLeaseInfo {
@@ -42,6 +43,37 @@ export class LeaseManager {
   public ceilingConfig?: Record<string, any>;
   public globalConfig?: ArbiterConfig;
   public experimentalScheduling: boolean = false;
+
+  // Diagnostics
+  public lastWatchdogRun: number = 0;
+  public persistenceErrors: number = 0;
+  private watchdogInFlight: boolean = false;
+
+  public getDiagnostics() {
+    return {
+      lastWatchdogRun: this.lastWatchdogRun,
+      persistenceErrors: this.persistenceErrors,
+      activeLeases: this.activeLeases.size,
+      deadLeaseHistory: this.deadLeaseHistory.size,
+      activeAdapters: this.activeAdapters.size,
+      yieldingTokens: this.yieldingTokens.size
+    };
+  }
+
+  public getStuckResourceInfo(resource: string) {
+    const lease = this.activeLeases.get(resource);
+    if (!lease) return null;
+    return {
+      resource,
+      state: lease.state,
+      token: lease.token.substring(0, 8),
+      age_seconds: Math.round((Date.now() - lease.created_at) / 1000),
+      last_heartbeat_age: Math.round((Date.now() - lease.last_heartbeat) / 1000),
+      last_activity_age: Math.round((Date.now() - lease.last_activity_at) / 1000),
+      remaining_seconds: Math.round((lease.expires_at - Date.now()) / 1000),
+      last_transition_reason: lease.last_transition_reason
+    };
+  }
 
   // --- Testing & State Manipulation APIs ---
   public injectTestState(resource: string, leaseInfo: Partial<LeaseInfo>): void {
@@ -273,7 +305,8 @@ export class LeaseManager {
           last_activity_at: now,
           has_started: false,
           state: 'GRANTED',
-          requested_duration_ms: duration * 1000
+          requested_duration_ms: duration * 1000,
+          last_transition_reason: 'initial_grant'
       });
       this.resourceStates.set(resource, 'GRANTED');
 
@@ -314,10 +347,12 @@ export class LeaseManager {
               if (!force && this.experimentalScheduling && runningCount > 0) {
                   lease.state = 'DRAINING';
                   this.resourceStates.set(resource, 'DRAINING');
+                  lease.last_transition_reason = `draining_active_permits_${runningCount}`;
                   log(`[Arbiter] Lease ${req.token} yielded; resource ${resource} enters DRAINING (${runningCount} permits).`);
               } else if (!force && this.experimentalScheduling && queueDepth === 0 && req.reason === 'release') {
                   lease.state = 'AVAILABLE';
                   this.resourceStates.set(resource, 'AVAILABLE');
+                  lease.last_transition_reason = 'transition_to_available';
                   log(`[Arbiter] Lease ${req.token} transitioned to AVAILABLE (Queue empty).`);
               } else {
                   if (force && runningCount > 0) {
@@ -355,7 +390,10 @@ export class LeaseManager {
               try {
                   const logPath = await withTimeout(adapter.captureLogs(), 5000) as string;
                   if (logPath) artifacts.push(logPath);
-              } catch (e: any) { warn(`[Background] captureLogs failed for ${resource}: ${e.message}`); }
+              } catch (e: any) { 
+                  warn(`[Background] captureLogs failed or timed out for ${resource}: ${e.message}`);
+                  warn(`[Background] Artifact capture skipped for ${resource} due to timeout.`);
+              }
 
               try {
                   const screenshotPath = await withTimeout(adapter.screenshot(), 5000) as string;
@@ -656,80 +694,92 @@ export class LeaseManager {
   }
 
   public async runWatchdog() {
-      const now = Date.now();
-      const leases = Array.from(this.activeLeases.entries());
-      
-      for (const [resource, lease] of leases) {
-          const queueDepth = this.queueDepthResolver ? this.queueDepthResolver(resource) : 0;
-
-          // 0. Initial Inactivity Timeout (New Feature)
-          // Default to 60s, configurable via ARBITER_INITIAL_INACTIVITY_TIMEOUT
-          // This ONLY applies if the lease has not started any activity yet.
-          if (!lease.has_started) {
-              const initialInactivityTimeout = parseInt(process.env.ARBITER_INITIAL_INACTIVITY_TIMEOUT || '60000');
-              if (now - lease.last_activity_at > initialInactivityTimeout) {
-                  log(`[Watchdog] Lease ${lease.token} on ${resource} reclaimed due to INITIAL inactivity (${Math.round((now - lease.last_activity_at)/1000)}s).`);
-                  await this.yieldLease({ token: lease.token, reason: 'inactivity_timeout' }, false);
-                  continue;
-              }
-          }
-
-          // 1. Soft Timeout detection: if we passed expires_at, block new commands!
-          if (now > lease.expires_at && lease.state === 'GRANTED') {
-              lease.state = 'EXPIRING';
-              log(`[Watchdog] Lease ${lease.token} moved to EXPIRING (Soft Cutoff Active)`);
-          }
-
-          // 2. Immediate Reclamation on Contention for Expired/Available Leases
-          // If expired/available AND someone is waiting...
-          if ((lease.state === 'EXPIRING' || lease.state === 'AVAILABLE') && queueDepth > 0) {
-              const resConfig = this.ceilingConfig?.[resource] || {};
-              const hbTimeout = resConfig.heartbeat_timeout_seconds || this.globalConfig?.heartbeat_timeout_seconds || 15;
-              const isActivelyWorking = (now - lease.last_heartbeat < (hbTimeout * 1000)); 
-              if (lease.state === 'AVAILABLE' || !isActivelyWorking) {
-                  log(`[Watchdog] Lease ${lease.token} (${lease.state}) is contended. Reclaiming immediately.`);
-                  // Universal DRAINING: Use force=false to allow draining if permits are running
-                  await this.yieldLease({ token: lease.token, reason: 'expired_contention' }, false);
-                  continue;
-              }
-          }
-
-          // 3. Zombie Protection (Safety Net): Force release only after 10 minutes of total silence!
-          const zombieLimit = parseInt(process.env.ARBITER_ZOMBIE_LIMIT || (process.env.ARBITER_TEST_MODE === 'true' ? '60000' : '600000'));
-          if (now - lease.last_heartbeat > zombieLimit) {
-              log(`[Watchdog] Lease ${lease.token} on ${resource} force-released! (Zombie/Crash Safety Net)`);
-              await this.yieldLease({ token: lease.token, reason: 'zombie_timeout' }, true);
-              continue;
-          }
+      if (this.watchdogInFlight) {
+          warn(`[Watchdog] Lease watchdog sweep overlap detected. Skipping current sweep.`);
+          return;
+      }
+      this.watchdogInFlight = true;
+      try {
+          const now = Date.now();
+          this.lastWatchdogRun = now;
+          const leases = Array.from(this.activeLeases.entries());
           
-          // 4. Hard Deadline (if command refuses to yield forever, preventing Expiry)
-          if ((lease.state === 'EXPIRING' || lease.state === 'DRAINING') && now > lease.hard_deadline) {
-             log(`[Watchdog] Lease ${lease.token} exceeded Hard Deadline on ${resource} while ${lease.state}! Force-releasing.`);
-             await this.yieldLease({ token: lease.token, reason: 'hard_timeout' }, true);
-             continue;
-          }
+          for (const [resource, lease] of leases) {
+              const queueDepth = this.queueDepthResolver ? this.queueDepthResolver(resource) : 0;
 
-          // Experimental Scheduling: Permit Execution Watchdog
-          if (this.experimentalScheduling) {
-              const permits = this.pendingPermits.get(resource) || {};
-              for (const p of Object.values(permits)) {
-                  // permit_start_deadline: must begin within 30 seconds of grant
-                  if (p.status === 'GRANTED' && p.executionStatus === 'NOT_STARTED' && p.granted_at && now - p.granted_at > 30000) {
-                      log(`[Watchdog] Permit ${p.id} expired: Never started execution.`);
-                      p.status = 'EXPIRED';
-                      p.executionStatus = 'ABANDONED';
-                      if (lease.state === 'DRAINING') this.checkDrainCompletion(resource);
+              // 0. Initial Inactivity Timeout (New Feature)
+              // Default to 60s, configurable via ARBITER_INITIAL_INACTIVITY_TIMEOUT
+              // This ONLY applies if the lease has not started any activity yet.
+              if (!lease.has_started) {
+                  const initialInactivityTimeout = parseInt(process.env.ARBITER_INITIAL_INACTIVITY_TIMEOUT || '60000');
+                  if (now - lease.last_activity_at > initialInactivityTimeout) {
+                      log(`[Watchdog] Lease ${lease.token} on ${resource} reclaimed due to INITIAL inactivity (${Math.round((now - lease.last_activity_at)/1000)}s).`);
+                      await this.yieldLease({ token: lease.token, reason: 'inactivity_timeout' }, false);
+                      continue;
                   }
-                  // permit_heartbeat_timeout: default 15 seconds after last heartbeat
+              }
+
+              // 1. Soft Timeout detection: if we passed expires_at, block new commands!
+              if (now > lease.expires_at && lease.state === 'GRANTED') {
+                  lease.state = 'EXPIRING';
+                  lease.last_transition_reason = 'soft_timeout_reached';
+                  log(`[Watchdog] Lease ${lease.token} moved to EXPIRING (Soft Cutoff Active)`);
+              }
+
+              // 2. Immediate Reclamation on Contention for Expired/Available Leases
+              // If expired/available AND someone is waiting...
+              if ((lease.state === 'EXPIRING' || lease.state === 'AVAILABLE') && queueDepth > 0) {
                   const resConfig = this.ceilingConfig?.[resource] || {};
                   const hbTimeout = resConfig.heartbeat_timeout_seconds || this.globalConfig?.heartbeat_timeout_seconds || 15;
-                  if (p.executionStatus === 'RUNNING' && p.last_heartbeat_at && now - p.last_heartbeat_at > (hbTimeout * 1000)) {
-                      log(`[Watchdog] Permit ${p.id} abandoned: Heartbeat timeout.`);
-                      p.executionStatus = 'ABANDONED';
-                      if (lease.state === 'DRAINING') this.checkDrainCompletion(resource);
+                  const isActivelyWorking = (now - lease.last_heartbeat < (hbTimeout * 1000)); 
+                  if (lease.state === 'AVAILABLE' || !isActivelyWorking) {
+                      log(`[Watchdog] Lease ${lease.token} (${lease.state}) is contended. Reclaiming immediately.`);
+                      // Universal DRAINING: Use force=false to allow draining if permits are running
+                      await this.yieldLease({ token: lease.token, reason: 'expired_contention' }, false);
+                      continue;
+                  }
+              }
+
+              // 3. Zombie Protection (Safety Net): Force release only after 10 minutes of total silence!
+              const zombieLimit = parseInt(process.env.ARBITER_ZOMBIE_LIMIT || (process.env.ARBITER_TEST_MODE === 'true' ? '60000' : '600000'));
+              if (now - lease.last_heartbeat > zombieLimit) {
+                  log(`[Watchdog] Lease ${lease.token} on ${resource} force-released! (Zombie/Crash Safety Net)`);
+                  await this.yieldLease({ token: lease.token, reason: 'zombie_timeout' }, true);
+                  continue;
+              }
+              
+              // 4. Hard Deadline (if command refuses to yield forever, preventing Expiry)
+              if ((lease.state === 'EXPIRING' || lease.state === 'DRAINING') && now > lease.hard_deadline) {
+                 log(`[Watchdog] Lease ${lease.token} exceeded Hard Deadline on ${resource} while ${lease.state}! Force-releasing.`);
+                 warn(`[Watchdog] Operation exceeded hard timeout (60s grace) for ${resource}. Killing now.`);
+                 await this.yieldLease({ token: lease.token, reason: 'hard_timeout' }, true);
+                 continue;
+              }
+
+              // Experimental Scheduling: Permit Execution Watchdog
+              if (this.experimentalScheduling) {
+                  const permits = this.pendingPermits.get(resource) || {};
+                  for (const p of Object.values(permits)) {
+                      // permit_start_deadline: must begin within 30 seconds of grant
+                      if (p.status === 'GRANTED' && p.executionStatus === 'NOT_STARTED' && p.granted_at && now - p.granted_at > 30000) {
+                          log(`[Watchdog] Permit ${p.id} expired: Never started execution.`);
+                          p.status = 'EXPIRED';
+                          p.executionStatus = 'ABANDONED';
+                          if (lease.state === 'DRAINING') this.checkDrainCompletion(resource);
+                      }
+                      // permit_heartbeat_timeout: default 15 seconds after last heartbeat
+                      const resConfig = this.ceilingConfig?.[resource] || {};
+                      const hbTimeout = resConfig.heartbeat_timeout_seconds || this.globalConfig?.heartbeat_timeout_seconds || 15;
+                      if (p.executionStatus === 'RUNNING' && p.last_heartbeat_at && now - p.last_heartbeat_at > (hbTimeout * 1000)) {
+                          log(`[Watchdog] Permit ${p.id} abandoned: Heartbeat timeout.`);
+                          p.executionStatus = 'ABANDONED';
+                          if (lease.state === 'DRAINING') this.checkDrainCompletion(resource);
+                      }
                   }
               }
           }
+      } finally {
+          this.watchdogInFlight = false;
       }
   }
 }
