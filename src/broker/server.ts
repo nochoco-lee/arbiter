@@ -41,6 +41,7 @@ function getAverageDuration(resource: string, command: string): number | null {
 }
 
 import { ConfigManager } from '../config/index';
+import { ContextManager } from '../context/index';
 import { log, warn, logBuffer, sseClients } from './logger';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -210,7 +211,7 @@ export const startBroker = (options: { resume?: boolean } = {}) => {
                     let installAvg = getAverageDuration(resource || '', 'adb install') || 30; // fallback to 30s
                     let estimates = { 'install': installAvg };
 
-                    const statusResp: any = { valid: true, expires_at: expires, queueDepth: depth, estimates, pending_permits: pending };
+                    const statusResp: any = { valid: true, resource: resource, expires_at: expires, queueDepth: depth, estimates, pending_permits: pending };
                     
                     // Check if it's a permit token specifically
                     const permit = leaseManager.getPermitsForResource(resource || '')?.[token];
@@ -246,8 +247,9 @@ export const startBroker = (options: { resume?: boolean } = {}) => {
                     res.writeHead(200);
                     res.end(JSON.stringify(statusResp));
                 } else {
+                    const status = leaseManager.getTokenStatus(token);
                     res.writeHead(401);
-                    res.end(JSON.stringify({ valid: false }));
+                    res.end(JSON.stringify({ valid: false, message: status.message }));
                 }
                 return;
             }
@@ -644,6 +646,7 @@ export const startBroker = (options: { resume?: boolean } = {}) => {
                 return res.end(JSON.stringify({ error: 'unauthorized_token' }));
             }
             
+            leaseManager.touchActivity(body.token);
             const adapter = await leaseManager.getAdapter(resource);
             try {
                 // Execute natively on the host's actual binary mapping
@@ -673,7 +676,17 @@ export const startBroker = (options: { resume?: boolean } = {}) => {
             return;
         }
 
-        // --- Log Endpoints ---
+        if (req.method === 'GET' && path === '/api/context') {
+            const resource = urlObj.searchParams.get('resource');
+            if (!resource) {
+                res.writeHead(400);
+                return res.end(JSON.stringify({ error: 'missing_resource' }));
+            }
+            const ctx = ContextManager.loadLastContext(resource);
+            res.writeHead(ctx ? 200 : 404);
+            return res.end(JSON.stringify(ctx || { error: 'no_context_found' }));
+        }
+
         if (req.method === 'GET' && path === '/api/logs') {
             const limitParam = urlObj.searchParams.get('limit');
             const limit = Math.min(parseInt(limitParam || '200', 10), LOG_BUFFER_SIZE);

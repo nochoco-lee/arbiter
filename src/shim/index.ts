@@ -384,6 +384,9 @@ async function main() {
                 const SHIM_ALIASES: Record<string, string> = { 'adb': 'android', 'android': 'adb' };
                 const aliasPeer = SHIM_ALIASES[requestAs];
                 console.error(`${getTimestamp()} [ARBITER SHIM] State: current lease token is invalid or expired.`);
+                if (meta.message) {
+                    console.error(`${getTimestamp()} [ARBITER SHIM] Reason: ${meta.message}`);
+                }
                 console.error(`${getTimestamp()} [ARBITER SHIM] Next: acquire a new lease before running '${caller}'.`);
                 console.error(`${getTimestamp()} [ARBITER SHIM] Choose '--wait' if this resource is needed now, or '--async' if you can keep working elsewhere first.`);
                 if (aliasPeer) {
@@ -658,6 +661,15 @@ async function main() {
                   process.stderr.write("Usage: arbiter request <resource> [--duration SECS] [--wait] [--async] [--ticket ID]\n");
                   return;
               }
+
+             if (token && meta.valid && meta.resource) {
+                 const SHIM_ALIASES: Record<string, string> = { 'adb': 'android', 'android': 'adb' };
+                 if (meta.resource === resource || SHIM_ALIASES[meta.resource] === resource || SHIM_ALIASES[resource] === meta.resource) {
+                     process.stderr.write(`${getTimestamp()} [ARBITER] You already hold an active lease for ${resource} (Token: ${token}).\n`);
+                     process.stderr.write(`${getTimestamp()} [ARBITER] If you need more time, use 'arbiter extend', or 'arbiter release' first.\n`);
+                     return;
+                 }
+             }
              
              const makeReq = async (conflict_accepted = false) => {
                  let progressIv: NodeJS.Timeout | undefined;

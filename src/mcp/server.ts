@@ -4,9 +4,8 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { queueManager } from '../queue';
-import { leaseManager } from '../state/lease';
-import { ContextManager } from '../context';
+
+const BROKER_URL = process.env.ARBITER_URL || "http://localhost:38401";
 
 const server = new Server(
     {
@@ -63,41 +62,82 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 });
 
 server.setRequestHandler(CallToolRequestSchema, async (request: any) => {
-    switch (request.params.name) {
-        case "request_lease": {
-            const token = await queueManager.enqueue({
-                resource: request.params.arguments.resource,
-                duration_seconds: request.params.arguments.duration_seconds
-            });
+    try {
+        switch (request.params.name) {
+            case "request_lease": {
+                const response = await fetch(`${BROKER_URL}/request`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        resource: request.params.arguments.resource,
+                        duration_seconds: request.params.arguments.duration_seconds
+                    })
+                });
+                const data = await response.json();
+                
+                if (response.status === 200) {
+                    return {
+                        content: [{ type: "text", text: `Lease Granted. Token: ${data.token}` }]
+                    };
+                } else if (response.status === 202) {
+                    return {
+                        content: [{ type: "text", text: `Lease Reserved (Enqueued). Ticket: ${data.token}. Estimated wait: ${data.estimated_wait_seconds}s` }]
+                    };
+                } else {
+                    return {
+                        content: [{ type: "text", text: `Failed to request lease: ${data.error || 'Unknown error'}` }],
+                        isError: true
+                    };
+                }
+            }
+            case "yield_lease": {
+                const response = await fetch(`${BROKER_URL}/yield`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        token: request.params.arguments.token,
+                        reason: request.params.arguments.reason
+                    })
+                });
+                const data = await response.json();
+                return {
+                    content: [{ type: "text", text: data.success ? "Lease yielded." : "Failed to yield." }]
+                };
+            }
+            case "get_context": {
+                const response = await fetch(`${BROKER_URL}/api/context?resource=${encodeURIComponent(request.params.arguments.resource)}`);
+                if (response.status === 200) {
+                    const ctx = await response.json();
+                    return {
+                        content: [{ type: "text", text: JSON.stringify(ctx, null, 2) }]
+                    };
+                } else {
+                    return {
+                        content: [{ type: "text", text: "No context found." }]
+                    };
+                }
+            }
+            default:
+                throw new Error(`Unknown tool: ${request.params.name}`);
+        }
+    } catch (error: any) {
+        if (error.cause?.code === 'ECONNREFUSED' || error.message?.includes('fetch failed')) {
             return {
-                content: [{ type: "text", text: `Lease Granted. Token: ${token}` }]
+                content: [{ 
+                    type: "text", 
+                    text: `Error: Could not connect to Arbiter Broker at ${BROKER_URL}. Please ensure the broker is running by executing 'arbiter start' in a separate terminal.` 
+                }],
+                isError: true
             };
         }
-        case "yield_lease": {
-            const success = await leaseManager.yieldLease({
-                token: request.params.arguments.token,
-                reason: request.params.arguments.reason
-            });
-            queueManager.pump('*');
-            return {
-                content: [{ type: "text", text: success ? "Lease yielded." : "Failed to yield." }]
-            };
-        }
-        case "get_context": {
-            const ctx = ContextManager.loadLastContext(request.params.arguments.resource);
-            return {
-                content: [{ type: "text", text: ctx ? JSON.stringify(ctx, null, 2) : "No context found." }]
-            };
-        }
-        default:
-            throw new Error(`Unknown tool: ${request.params.name}`);
+        throw error;
     }
 });
 
 async function main() {
     const transport = new StdioServerTransport();
     await server.connect(transport);
-    console.error("Arbiter MCP Server running on stdio");
+    console.error("Arbiter MCP Server running on stdio (Bridge Mode)");
 }
 
 if (require.main === module) {
