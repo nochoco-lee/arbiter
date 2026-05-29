@@ -39,6 +39,14 @@ export function log(msg: string) {
     pushLog(line);
 }
 
+export function debug(msg: string) {
+    if (process.env.ARBITER_DEBUG === 'true') {
+        const line = `${getTimestamp()} [DEBUG] ${msg}`;
+        process.stdout.write(line + '\n');
+        pushLog(line);
+    }
+}
+
 export function warn(msg: string) {
     const line = `${getTimestamp()} ${msg}`;
     process.stderr.write(line + '\n');

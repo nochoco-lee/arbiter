@@ -1,7 +1,7 @@
 import { LeaseRequest } from '../api/types';
 import { leaseManager } from '../state/lease';
 import { randomUUID } from 'crypto';
-import { log } from '../broker/logger';
+import { log, debug } from '../broker/logger';
 
 interface QueueEntry {
   id: string;
@@ -101,7 +101,7 @@ class QueueEngine {
       
       const activeLease = leaseManager.getActiveLeaseInfo(resource);
       let remainingMs = 0;
-      if (activeLease) {
+      if (activeLease && activeLease.state !== 'AVAILABLE') {
           remainingMs = Math.max(0, activeLease.expires_at - Date.now());
       }
       
@@ -161,6 +161,7 @@ class QueueEngine {
           if (this.experimentalScheduling) {
               log(`[Queue] Entry Created: id=${entry.id}, resource=${request.resource}, mode=${entry.wait_mode}`);
           }
+          debug(`[Queue] Enqueued ${entry.id} for ${request.resource}. Total depth: ${resourceQueue.length}`);
           
           if (this.experimentalScheduling && entry.wait_mode === 'ASYNC') {
               // For async, we return the ticket ID immediately instead of waiting for promotion
@@ -179,24 +180,34 @@ class QueueEngine {
           return;
       }
       
-      if (this.pumping.has(resource)) return;
+      if (this.pumping.has(resource)) {
+          debug(`[Queue] Already pumping ${resource}, skipping.`);
+          return;
+      }
       this.pumping.add(resource);
+      debug(`[Queue] Pumping ${resource}...`);
 
       try {
           while (true) {
               const resourceQueue = this.queue.get(resource) || [];
-              if (resourceQueue.length === 0) break;
+              if (resourceQueue.length === 0) {
+                  debug(`[Queue] ${resource} queue empty.`);
+                  break;
+              }
 
               const state = leaseManager.getResourceState(resource);
+              debug(`[Queue] ${resource} state: ${state}`);
               
               // Experimental Scheduling: Block if DRAINING
               if (this.experimentalScheduling && state === 'DRAINING') {
+                  debug(`[Queue] ${resource} is DRAINING, blocking promotion.`);
                   break;
               }
 
               if (state === 'FREE' || state === 'AVAILABLE') {
                   const head = resourceQueue[0];
                   if (!head) break;
+                  debug(`[Queue] Processing head ${head.id} (mode=${head.wait_mode}, status=${head.status})`);
 
                   // Milestone 3: Handle READY state for Reservations
                   if (this.experimentalScheduling && head.wait_mode === 'ASYNC') {

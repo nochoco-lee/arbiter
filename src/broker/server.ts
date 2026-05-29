@@ -42,7 +42,7 @@ function getAverageDuration(resource: string, command: string): number | null {
 
 import { ConfigManager } from '../config/index';
 import { ContextManager } from '../context/index';
-import { log, warn, logBuffer, sseClients } from './logger';
+import { log, warn, logBuffer, sseClients, debug } from './logger';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -321,6 +321,7 @@ export const startBroker = (options: { resume?: boolean } = {}) => {
             }
 
             log(`[Broker] Incoming Request: resource=${body.resource}, duration=${body.duration_seconds || 'default'}`);
+            debug(`[Broker] Request body: ${JSON.stringify(body)}`);
             
             const ADAPTER_KEYWORDS = ['auto', 'adb', 'android', 'sdb', 'simctl', 'windows', 'macos', 'linux'];
             // If requested resource matches a known generic adapter/auto keyword natively, AND it is not explicitly registered as an exact string literal in ceilingConfig...
@@ -367,8 +368,14 @@ export const startBroker = (options: { resume?: boolean } = {}) => {
             const thresholdWaitMs = parseInt(process.env.ARBITER_TICKET_THRESHOLD_WAIT || '180') * 1000;
             const estimatedWait = queueManager.getEstimatedWait(body.resource) * 1000;
             
-            if (estimatedWait > thresholdWaitMs && body.wait_mode !== 'BLOCKING') {
+            // Compatibility for older API callers: default allow_conflict to BLOCKING
+            if (body.allow_conflict && !body.wait_mode) {
+                body.wait_mode = 'BLOCKING';
+            }
+
+            if (estimatedWait > thresholdWaitMs && body.wait_mode !== 'BLOCKING' && currentState !== 'FREE' && currentState !== 'AVAILABLE') {
                 // If the user didn't EXPLICITLY ask for BLOCKING, and it's going to be long,
+                // and the resource isn't immediately ready to be grabbed (preempted),
                 // we treat it as ASYNC to be safe and avoid HTTP timeouts.
                 body.wait_mode = 'ASYNC';
             }
@@ -485,19 +492,23 @@ export const startBroker = (options: { resume?: boolean } = {}) => {
         // --- Reservation Tickets (Milestone 3) ---
         if (req.method === 'POST' && path === '/api/reservation/claim') {
             const body = await readJsonBody<{ticketId: string}>(req);
+            debug(`[Broker] Claiming ticket: ${body.ticketId}`);
             const { token, error } = await queueManager.claimTicket(body.ticketId);
             if (token) {
                 const resource = leaseManager.getResourceByToken(token);
                 if (!resource) {
                     // Token doesn't map to an active lease — defence against leaked ticket IDs
                     log(`[Broker] Claim returned token ${token.substring(0, 8)}... but it has no active lease. Rejecting as ticket_still_waiting.`);
+                    debug(`[Broker] Claimed token ${token} has no active lease mapping.`);
                     res.writeHead(400);
                     res.end(JSON.stringify({ error: 'ticket_still_waiting' }));
                     return;
                 }
+                debug(`[Broker] Ticket ${body.ticketId} claimed successfully: ${token}`);
                 res.writeHead(200);
                 res.end(JSON.stringify({ token, resource }));
             } else {
+                debug(`[Broker] Ticket claim failed: ${error}`);
                 res.writeHead(400);
                 const ticketStatus = queueManager.getTicketStatus(body.ticketId);
                 res.end(JSON.stringify({ 
@@ -903,5 +914,7 @@ export const startBroker = (options: { resume?: boolean } = {}) => {
 
 if (require.main === module) {
   const resume = process.argv.includes('--resume') || process.argv.includes('-r');
+  const debugMode = process.argv.includes('--debug') || process.argv.includes('-d');
+  if (debugMode) process.env.ARBITER_DEBUG = 'true';
   startBroker({ resume });
 }

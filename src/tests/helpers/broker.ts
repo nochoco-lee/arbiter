@@ -24,6 +24,7 @@ export async function brokerRequest(port: number, path: string, payload: any, ex
 
 export async function requestLease(port: number, resource: string, duration?: number, wait: boolean = false): Promise<any> {
     const payload: any = { resource, duration_seconds: duration, allow_conflict: wait };
+    if (wait) payload.wait_mode = 'BLOCKING';
     return brokerRequest(port, '/request', payload);
 }
 
