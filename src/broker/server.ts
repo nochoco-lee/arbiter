@@ -362,8 +362,17 @@ export const startBroker = (options: { resume?: boolean } = {}) => {
                 log(`[Broker] Resource ${body.resource} busy (${currentState}). Enqueuing requester...`);
             }
 
-            // Experimental Scheduling: Upfront auto-shift has been disabled to respect explicit --wait intents.
-            // We now rely on the Dynamic Async Shift (3-minute watchdog) to handle actual wait durations.
+            // Bounded Blocking: If the request is expected to wait longer than the threshold, 
+            // we return 202 RESERVED immediately if it's not granted right away.
+            const thresholdWaitMs = parseInt(process.env.ARBITER_TICKET_THRESHOLD_WAIT || '180') * 1000;
+            const estimatedWait = queueManager.getEstimatedWait(body.resource) * 1000;
+            
+            if (estimatedWait > thresholdWaitMs && body.wait_mode !== 'BLOCKING') {
+                // If the user didn't EXPLICITLY ask for BLOCKING, and it's going to be long,
+                // we treat it as ASYNC to be safe and avoid HTTP timeouts.
+                body.wait_mode = 'ASYNC';
+            }
+
             const token = await queueManager.enqueue(body as unknown as LeaseRequest);
             const actualResource = leaseManager.getResourceByToken(token) || body.resource;
             const state_snapshot = stateSnapshots[actualResource] || {};
@@ -372,12 +381,18 @@ export const startBroker = (options: { resume?: boolean } = {}) => {
 
             if ((body.wait_mode === 'ASYNC' || isTicket) && !leaseManager.getResourceByToken(token)) {
                 // If it's async or dynamically shifted, and not immediately granted
+                const estWait = queueManager.getEstimatedWait(actualResource);
                 res.writeHead(202);
                 res.end(JSON.stringify({ 
                     token, 
                     resource: actualResource, 
                     status: 'RESERVED',
-                    estimated_wait_seconds: queueManager.getEstimatedWait(actualResource)
+                    estimated_wait_seconds: estWait,
+                    wait_deadline_ms: Date.now() + (estWait * 1000),
+                    diagnostics: {
+                        queue_depth: queueManager.getQueueDepth(actualResource),
+                        resource_state: leaseManager.getResourceState(actualResource)
+                    }
                 }));
                 return;
             }
@@ -411,9 +426,15 @@ export const startBroker = (options: { resume?: boolean } = {}) => {
             if (!body.token) return res.writeHead(400).end();
             const resource = leaseManager.getResourceByToken(body.token);
             const yielded = await leaseManager.releaseLease(body.token);
+            const release_state = resource ? leaseManager.getResourceState(resource) : 'UNKNOWN';
             log(`[Broker] Lease RELEASED: resource=${resource || 'unknown'}, yielded=${yielded}`);
             res.writeHead(200);
-            return res.end(JSON.stringify({ yielded }));
+            return res.end(JSON.stringify({ 
+                yielded, 
+                artifacts_pending: true,
+                release_state,
+                transition_reason: body.msg || 'release'
+            }));
         }
 
         if (req.method === 'POST' && path === '/api/permit/request') {
@@ -478,7 +499,15 @@ export const startBroker = (options: { resume?: boolean } = {}) => {
                 res.end(JSON.stringify({ token, resource }));
             } else {
                 res.writeHead(400);
-                res.end(JSON.stringify({ error: error || 'ticket_invalid' }));
+                const ticketStatus = queueManager.getTicketStatus(body.ticketId);
+                res.end(JSON.stringify({ 
+                    error: error || 'ticket_invalid',
+                    diagnostics: ticketStatus ? {
+                        position: ticketStatus.position,
+                        estimated_wait_seconds: ticketStatus.estimated_wait_seconds,
+                        resource_state: leaseManager.getResourceState(ticketStatus.resource)
+                    } : undefined
+                }));
             }
             return;
         }
@@ -489,7 +518,13 @@ export const startBroker = (options: { resume?: boolean } = {}) => {
             const status = queueManager.getTicketStatus(ticketId);
             if (status) {
                 res.writeHead(200);
-                res.end(JSON.stringify(status));
+                res.end(JSON.stringify({
+                    ...status,
+                    wait_deadline_ms: status.claim_deadline || (Date.now() + (status.estimated_wait_seconds * 1000)),
+                    diagnostics: {
+                        resource_state: leaseManager.getResourceState(status.resource)
+                    }
+                }));
             } else {
                 res.writeHead(404);
                 res.end(JSON.stringify({ error: 'ticket_not_found' }));
@@ -546,6 +581,11 @@ export const startBroker = (options: { resume?: boolean } = {}) => {
                             installed_at: new Date().toISOString(),
                             apk_hash: body.apk_hash
                         };
+                        // Cap recorded packages to prevent memory leak
+                        const pkgs = Object.keys(stateSnapshots[resource].installed_packages);
+                        if (pkgs.length > 50) {
+                            delete stateSnapshots[resource].installed_packages[pkgs[0]];
+                        }
                     }
                 } else if (fullCmd.includes('setprop') || fullCmd.includes('settings put')) {
                     stateSnapshots[resource].config_changes.push({
@@ -553,6 +593,9 @@ export const startBroker = (options: { resume?: boolean } = {}) => {
                          changed_at: new Date().toISOString(),
                          command: fullCmd
                     });
+                    if (stateSnapshots[resource].config_changes.length > 50) {
+                        stateSnapshots[resource].config_changes.shift();
+                    }
                 }
             }
             // Notify Mode is strictly async, unblocking
@@ -597,10 +640,12 @@ export const startBroker = (options: { resume?: boolean } = {}) => {
                 // Track both exact command AND generic pattern
                 if (!durationHistory[resource][fullCmd]) durationHistory[resource][fullCmd] = [];
                 durationHistory[resource][fullCmd].push(body.duration_ms);
+                if (durationHistory[resource][fullCmd].length > 20) durationHistory[resource][fullCmd].shift();
 
                 if (fullCmd !== pattern) {
                     if (!durationHistory[resource][pattern]) durationHistory[resource][pattern] = [];
                     durationHistory[resource][pattern].push(body.duration_ms);
+                    if (durationHistory[resource][pattern].length > 20) durationHistory[resource][pattern].shift();
                 }
             }
             res.writeHead(202).end(); // Fire and forget Accepted
@@ -666,13 +711,20 @@ export const startBroker = (options: { resume?: boolean } = {}) => {
                 res.writeHead(400);
                 return res.end(JSON.stringify({ error: 'missing_token' }));
             }
+            const resource = leaseManager.getResourceByToken(body.token);
             const success = await leaseManager.yieldLease(body);
+            const release_state = resource ? leaseManager.getResourceState(resource) : 'UNKNOWN';
             
             // Kick the queue for all empty resources
             queueManager.pump('*'); 
 
             res.writeHead(success ? 200 : 400);
-            res.end(JSON.stringify({ success }));
+            res.end(JSON.stringify({ 
+                success, 
+                artifacts_pending: true,
+                release_state,
+                transition_reason: body.reason || 'yielded'
+            }));
             return;
         }
 

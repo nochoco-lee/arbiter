@@ -72,6 +72,7 @@ export class LeaseManager {
           this.activeLeases.delete(resource);
           this.resourceStates.set(resource, 'FREE');
           if (this.onResourceFree) this.onResourceFree(resource);
+          this.cleanupAdapter(resource).catch(() => {});
       } else {
           const lease = this.activeLeases.get(resource);
           if (lease) {
@@ -381,6 +382,11 @@ export class LeaseManager {
       } catch (e: any) {
           warn(`[Background] saveContext failed for ${resource}: ${e.message || e}`);
       }
+
+      // Final Cleanup: If resource is FREE, evict and disconnect the adapter
+      if (this.getResourceState(resource) === 'FREE') {
+          this.cleanupAdapter(resource).catch(() => {});
+      }
   }
 
   public touchHeartbeat(token: string): boolean {
@@ -608,6 +614,18 @@ export class LeaseManager {
       return false;
   }
 
+  private async cleanupAdapter(resource: string) {
+      const adapter = this.activeAdapters.get(resource);
+      if (adapter) {
+          this.activeAdapters.delete(resource);
+          try {
+              await adapter.disconnect();
+          } catch (e: any) {
+              warn(`[Arbiter] Adapter disconnect failed for ${resource}: ${e.message || e}`);
+          }
+      }
+  }
+
   private checkDrainCompletion(resource: string) {
       const lease = this.activeLeases.get(resource);
       if (!lease || lease.state !== 'DRAINING') return;
@@ -619,6 +637,7 @@ export class LeaseManager {
           this.activeLeases.delete(resource);
           this.resourceStates.set(resource, 'FREE');
           if (this.onResourceFree) this.onResourceFree(resource);
+          this.cleanupAdapter(resource).catch(() => {});
       }
   }
 

@@ -284,7 +284,24 @@ class QueueEngine {
                       this.pump(resource);
                       return resolve({ token });
                   } else if (entry.status === 'WAITING') {
-                      return resolve({ token: null, error: 'ticket_still_waiting' });
+                      entry.wait_mode = 'BLOCKING';
+                      entry.claim_pending = true;
+                      const oldResolve = entry.resolve;
+                      const oldReject = entry.reject;
+                      
+                      entry.resolve = (token: string) => {
+                          entry.claim_pending = false;
+                          oldResolve(token);
+                          resolve({ token });
+                      };
+                      entry.reject = (err: Error) => {
+                          entry.claim_pending = false;
+                          oldReject(err);
+                          resolve({ token: null, error: err.message });
+                      };
+                      
+                      log(`[Queue] Ticket Claim BLOCKED: id=${ticketId}, resource=${resource}. Waiting for promotion...`);
+                      return;
                   } else if (entry.status === 'MISSED') {
                       return resolve({ token: null, error: 'ticket_missed_turn' });
                   } else if (entry.status === 'EXPIRED') {
