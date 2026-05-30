@@ -4,6 +4,7 @@ import { allocatePort, startBrokerWithEnv, BrokerInstance, delay } from '../help
 import { brokerRequest } from '../helpers/broker';
 import { spawn } from 'child_process';
 import * as path from 'path';
+import * as fs from 'fs';
 
 describe('Remote Broker Execution (WebSocket)', () => {
     let port: number;
@@ -139,7 +140,12 @@ describe('Remote Broker Execution (WebSocket)', () => {
 
         // Hard kill the shim
         console.log('--- KILLING SHIM ---');
-        child.kill('SIGKILL');
+        if (process.platform === 'win32') {
+            const { spawnSync } = require('child_process');
+            spawnSync('taskkill', ['/pid', child.pid!.toString(), '/f', '/t']);
+        } else {
+            child.kill('SIGKILL');
+        }
         await delay(500);
         console.log('--- FINISHED SCENARIO 5 ---');
     });
@@ -182,5 +188,48 @@ describe('Remote Broker Execution (WebSocket)', () => {
         assert.strictEqual(code, 0); 
         // Mock stream should have printed the cleanup message
         assert.match(allStdout, /Logcat interrupted cleanly/);
+    });
+
+    test('Scenario 7: File Upload & Interception (Push/Install)', async () => {
+        const testFile = path.resolve(__dirname, 'test_upload.txt');
+        fs.writeFileSync(testFile, 'hello_upload');
+
+        try {
+            const res = await runShim(['mock', '--echo', testFile]);
+            assert.strictEqual(res.code, 0);
+
+            // The output should be the rewritten remote path containing arbiter-uploads and the test filename
+            assert.match(res.stdout, /arbiter-uploads/);
+            assert.match(res.stdout, /test_upload\.txt/);
+
+            // Extract path from output to check that the broker cleaned it up after execution
+            const match = res.stdout.match(/(\S+test_upload\.txt)/);
+            if (match && match[1]) {
+                const remotePath = match[1].trim();
+                // Ensure the file was deleted on the broker
+                assert.strictEqual(fs.existsSync(remotePath), false);
+            }
+        } finally {
+            try { fs.unlinkSync(testFile); } catch {}
+        }
+    });
+
+    test('Scenario 8: File Pull Integration', async () => {
+        const localDest = path.resolve(__dirname, 'pulled_result.txt');
+        try {
+            // Delete if exists
+            if (fs.existsSync(localDest)) fs.unlinkSync(localDest);
+
+            // Execute adb pull through the shim
+            const res = await runShim(['adb', 'pull', '/sdcard/test_file.txt', localDest]);
+            assert.strictEqual(res.code, 0);
+
+            // Check that the file was successfully downloaded to the local path
+            assert.strictEqual(fs.existsSync(localDest), true);
+            const content = fs.readFileSync(localDest, 'utf8');
+            assert.strictEqual(content, 'Mock pulled file content');
+        } finally {
+            try { fs.unlinkSync(localDest); } catch {}
+        }
     });
 });

@@ -26,6 +26,14 @@ async function main() {
     
     const configList = JSON.parse(fs.readFileSync(configPath, 'utf8'));
     
+    // Support mock pull: write mock file content to the last argument path
+    if (args[0] === 'pull' && args.length >= 3) {
+        const destPath = args[args.length - 1];
+        try {
+            fs.writeFileSync(destPath, 'Mock pulled file content');
+        } catch (e) {}
+    }
+    
     // Evaluate args iteratively
     for (const cfg of configList) {
         // Simple subset matching: if every string in argsMatch appears in the executed arguments

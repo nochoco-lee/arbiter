@@ -113,12 +113,12 @@
     },
     {
       "action": "delay",
-      "ms": 3000
+      "ms": 2000
     },
     {
       "action": "heartbeat",
       "agentId": "remote_agent",
-      "description": "Heartbeat at 3s"
+      "description": "Heartbeat at 2s (3s margin before 5s expiry, tolerates WSL timer slop)"
     },
     {
       "action": "delay",

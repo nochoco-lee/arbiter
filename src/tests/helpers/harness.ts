@@ -19,7 +19,12 @@ export class BrokerInstance {
                 }
                 resolve();
             });
-            this.process.kill('SIGKILL');
+            if (process.platform === 'win32') {
+                const { spawnSync } = require('child_process');
+                spawnSync('taskkill', ['/pid', this.process.pid!.toString(), '/f', '/t']);
+            } else {
+                this.process.kill('SIGKILL');
+            }
         });
     }
 }
@@ -122,7 +127,7 @@ export async function startBrokerWithEnv(port: number, env: Record<string, strin
             ARBITER_SKIP_ARTIFACTS: 'true',
             ARBITER_CONTEXT_DIR: testDir,
             ARBITER_REAL_ADB_PATH: `node ${tsNodeBin} ${path.resolve(__dirname, '..', 'tdb.ts')}`,
-            ARBITER_REAL_MOCK_PATH: `node ${path.resolve(__dirname, '..', 'mock_stream.js')}`,
+            ARBITER_REAL_MOCK_PATH: `node ${tsNodeBin} ${path.resolve(__dirname, '..', 'mock_stream.ts')}`,
             TDB_CONFIG_PATH: tdbConfigFile
         }
     });
