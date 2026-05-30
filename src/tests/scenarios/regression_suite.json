@@ -1,0 +1,173 @@
+{
+  "name": "Regression Suite",
+  "runner": "json",
+  "config": {
+    "ARBITER_QUIET_EXPIRY_GRACE_MS": "2500"
+  },
+  "steps": [
+    {
+      "action": "delay",
+      "comment": "--- Scenario: AVAILABLE reentrancy (two queued waiters must not grant the second first) ---",
+      "ms": 1
+    },
+    {
+      "action": "request",
+      "agentId": "agent0",
+      "resourceSuffix": "reentrancy",
+      "duration": 1,
+      "description": "Agent 0 takes the resource briefly so that Agent 1 and Agent 2 actually queue behind it"
+    },
+    {
+      "action": "request",
+      "agentId": "agent1",
+      "resourceSuffix": "reentrancy",
+      "wait": true,
+      "background": true,
+      "description": "Agent 1 requests resource and blocks (queues behind Agent 0)"
+    },
+    {
+      "action": "delay",
+      "ms": 500
+    },
+    {
+      "action": "request",
+      "agentId": "agent2",
+      "resourceSuffix": "reentrancy",
+      "wait": true,
+      "background": true,
+      "description": "Agent 2 requests resource and blocks (queues behind Agent 1)"
+    },
+    {
+      "action": "delay",
+      "ms": 500
+    },
+    {
+      "action": "poll_queue",
+      "resourceSuffix": "reentrancy",
+      "waitForState": "BLOCKING_WAIT",
+      "description": "Wait for Agent 1 to be at the head of the queue"
+    },
+    {
+      "action": "assert_queue_depth",
+      "resourceSuffix": "reentrancy",
+      "queueDepth": 2
+    },
+    {
+      "action": "delay",
+      "ms": 1500,
+      "comment": "Wait for Agent 0's 1s lease to expire and trigger AVAILABLE state"
+    },
+    {
+      "action": "assert_broker_state",
+      "resourceSuffix": "reentrancy",
+      "expectedState": "GRANTED",
+      "description": "Resource should be GRANTED (to Agent 1, who was first in queue)"
+    },
+    {
+      "action": "delay",
+      "comment": "--- Scenario: Hanging artifact capture (release returns quickly and next waiter receives lease) ---",
+      "ms": 1
+    },
+    {
+      "action": "request",
+      "agentId": "artifact_owner",
+      "resourceSuffix": "artifacts",
+      "duration": 60
+    },
+    {
+      "action": "request",
+      "agentId": "artifact_waiter",
+      "resourceSuffix": "artifacts",
+      "wait": true,
+      "background": true
+    },
+    {
+      "action": "delay",
+      "ms": 500
+    },
+    {
+      "action": "broker_request",
+      "endpoint": "/api/lease/release",
+      "agentId": "artifact_owner",
+      "payload": { "hang_artifacts": true },
+      "expectStatus": 200,
+      "description": "Release with a flag that simulates slow artifact capture"
+    },
+    {
+      "action": "wait_broker_state",
+      "resourceSuffix": "artifacts",
+      "expectedState": "GRANTED",
+      "timeoutMs": 5000,
+      "description": "Next waiter should receive the lease quickly even if artifacts are hanging"
+    },
+    {
+      "action": "delay",
+      "comment": "--- Scenario: Remote silent command (heartbeat keeps lease alive) ---",
+      "ms": 1
+    },
+    {
+      "action": "request",
+      "agentId": "remote_agent",
+      "resourceSuffix": "remote",
+      "duration": 5
+    },
+    {
+      "action": "delay",
+      "ms": 3000
+    },
+    {
+      "action": "heartbeat",
+      "agentId": "remote_agent",
+      "description": "Heartbeat at 3s"
+    },
+    {
+      "action": "delay",
+      "ms": 3000
+    },
+    {
+      "action": "assert_broker_state",
+      "resourceSuffix": "remote",
+      "expectedState": "GRANTED",
+      "description": "Lease should still be GRANTED at 6s total because of heartbeat"
+    },
+    {
+      "action": "delay",
+      "ms": 5000
+    },
+    {
+      "action": "wait_broker_state",
+      "resourceSuffix": "remote",
+      "expectedState": "AVAILABLE",
+      "description": "Lease should eventually expire after heartbeat stops"
+    },
+    {
+      "action": "delay",
+      "comment": "--- Scenario: Hanging adapter command (broker /status remains responsive) ---",
+      "ms": 1
+    },
+    {
+      "action": "request",
+      "agentId": "owner",
+      "resourceSuffix": "hanging_cmd",
+      "duration": 60
+    },
+    {
+      "action": "broker_request",
+      "endpoint": "/relay",
+      "agentId": "owner",
+      "payload": { "args": ["sleep", "30"] },
+      "async": true,
+      "description": "Trigger a long-running relayed command (simulated by sleep)"
+    },
+    {
+      "action": "delay",
+      "ms": 500
+    },
+    {
+      "action": "assert_broker_state",
+      "resourceSuffix": "hanging_cmd",
+      "expectedState": "GRANTED",
+      "description": "Verify /status is still responsive during hanging command and resource is GRANTED"
+    }
+  ]
+}

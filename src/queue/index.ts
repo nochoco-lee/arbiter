@@ -22,6 +22,28 @@ class QueueEngine {
   private pumping: Set<string> = new Set();
   public experimentalScheduling: boolean = true;
 
+  // Diagnostics
+  public lastWatchdogRun: number = 0;
+  private watchdogInFlight: boolean = false;
+
+  public getDiagnostics() {
+      let totalDepth = 0;
+      let oldestAge = 0;
+      for (const [res, q] of this.queue.entries()) {
+          totalDepth += q.length;
+          if (q.length > 0) {
+              const age = Date.now() - q[0].waiting_since;
+              if (age > oldestAge) oldestAge = age;
+          }
+      }
+      return {
+          lastWatchdogRun: this.lastWatchdogRun,
+          totalQueueDepth: totalDepth,
+          oldestQueueAgeMs: oldestAge,
+          activePumping: this.pumping.size
+      };
+  }
+
   public getQueueDepth(resource: string): number {
       return this.queue.get(resource)?.length || 0;
   }
@@ -326,28 +348,38 @@ class QueueEngine {
 
   public runWatchdog() {
       if (!this.experimentalScheduling) return;
-      const thresholdWaitMs = parseInt(process.env.ARBITER_TICKET_THRESHOLD_WAIT || '180') * 1000;
-      
-      for (const resource of this.queue.keys()) {
-          this.pump(resource);
+      if (this.watchdogInFlight) {
+          log(`[Queue] Watchdog overlap detected. Skipping.`);
+          return;
+      }
+      this.watchdogInFlight = true;
+      try {
+          this.lastWatchdogRun = Date.now();
+          const thresholdWaitMs = parseInt(process.env.ARBITER_TICKET_THRESHOLD_WAIT || '180') * 1000;
           
-          // Dynamic Async Shift: Retroactively convert long-waiting BLOCKING entries into ASYNC tickets
-          const resourceQueue = this.queue.get(resource) || [];
-          for (const entry of resourceQueue) {
-              if (entry.wait_mode === 'BLOCKING' && entry.status === 'WAITING' && (Date.now() - entry.waiting_since) > thresholdWaitMs) {
-                  if (entry.claim_pending) {
-                      log(`[Queue] Dynamic Async Shift skipped: Entry ${entry.id} has a blocking claim in flight.`);
-                      continue;
+          for (const resource of this.queue.keys()) {
+              this.pump(resource);
+              
+              // Dynamic Async Shift: Retroactively convert long-waiting BLOCKING entries into ASYNC tickets
+              const resourceQueue = this.queue.get(resource) || [];
+              for (const entry of resourceQueue) {
+                  if (entry.wait_mode === 'BLOCKING' && entry.status === 'WAITING' && (Date.now() - entry.waiting_since) > thresholdWaitMs) {
+                      if (entry.claim_pending) {
+                          log(`[Queue] Dynamic Async Shift skipped: Entry ${entry.id} has a blocking claim in flight.`);
+                          continue;
+                      }
+                      if (entry.async_notified) {
+                          continue; // Already shifted once, don't resolve again
+                      }
+                      log(`[Queue] Dynamic Async Shift: Entry ${entry.id} waited > ${thresholdWaitMs/1000}s. Converting to ASYNC Ticket.`);
+                      entry.wait_mode = 'ASYNC';
+                      entry.async_notified = true;
+                      entry.resolve(entry.id); // This resolves the hanging enqueue() promise, returning the ticket ID
                   }
-                  if (entry.async_notified) {
-                      continue; // Already shifted once, don't resolve again
-                  }
-                  log(`[Queue] Dynamic Async Shift: Entry ${entry.id} waited > ${thresholdWaitMs/1000}s. Converting to ASYNC Ticket.`);
-                  entry.wait_mode = 'ASYNC';
-                  entry.async_notified = true;
-                  entry.resolve(entry.id); // This resolves the hanging enqueue() promise, returning the ticket ID
               }
           }
+      } finally {
+          this.watchdogInFlight = false;
       }
   }
 }

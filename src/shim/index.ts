@@ -92,13 +92,32 @@ async function shimRequest<T>(url: string, options: http.RequestOptions = {}, bo
     });
 }
 
-async function checkLease(token: string, reactivate: boolean = true): Promise<{valid: boolean, expires_at?: number, queueDepth?: number, error?: string, status?: number}> {
+async function checkLease(token: string, reactivate: boolean = true): Promise<{valid: boolean, expires_at?: number, queueDepth?: number, error?: string, status?: number, message?: string}> {
     const res = await shimRequest<any>(`${BROKER_URL}/status?reactivate=${reactivate}`, {
         method: 'GET',
         headers: { 'Authorization': `Bearer ${token}` }
     });
-    if (res.error) return { valid: false, error: res.error };
+    if (res.error) return { valid: false, error: res.error, status: res.status };
     return { ...res.data, valid: res.status === 200, status: res.status };
+}
+
+function handleBrokerError(res: { error?: string, status?: number }, context: string) {
+    const ts = getTimestamp();
+    if (res.error === 'TIMEOUT') {
+        process.stderr.write(`${ts} [ARBITER] ERROR: Broker request timed out during ${context}.\n`);
+        process.stderr.write(`${ts} [ARBITER] Target: ${BROKER_URL}\n`);
+        process.stderr.write(`${ts} [ARBITER] Next: Check broker load or network connectivity.\n`);
+    } else if (res.error && (res.error.includes('ECONNREFUSED') || res.error === 'ECONNREFUSED')) {
+        process.stderr.write(`${ts} [ARBITER] CRITICAL: Broker connection refused during ${context}.\n`);
+        process.stderr.write(`${ts} [ARBITER] Target: ${BROKER_URL}\n`);
+        process.stderr.write(`${ts} [ARBITER] Diagnosis: The broker daemon is not running.\n`);
+        process.stderr.write(`${ts} [ARBITER] Troubleshooting: Run 'arbiter start' to begin the session.\n`);
+    } else if (res.error === 'JSON_PARSE_ERROR') {
+        process.stderr.write(`${ts} [ARBITER] ERROR: Malformed response from broker during ${context}.\n`);
+        process.stderr.write(`${ts} [ARBITER] Diagnosis: The broker returned non-JSON data. This might indicate an internal crash or a misconfigured proxy.\n`);
+    } else {
+        process.stderr.write(`${ts} [ARBITER] ERROR: Broker request failed during ${context}: ${res.error || 'Unknown error'} (Status: ${res.status || 0})\n`);
+    }
 }
 
 async function checkResourceStatus(resource: string): Promise<any> {
@@ -377,8 +396,8 @@ async function main() {
         const shouldReactivate = !isTokenExempt;
         meta = await checkLease(token, shouldReactivate);
         if (!meta.valid && !isTokenExempt) {
-            if (meta.error && meta.error.includes('ECONNREFUSED')) {
-                process.stderr.write(`${getTimestamp()} [ARBITER] Could not connect to broker at ${BROKER_URL}. Is 'arbiter start' running?\n`);
+            if (meta.error) {
+                handleBrokerError(meta, 'lease validation');
             } else {
                 const requestAs = caller === 'arbiter' ? 'adb' : caller;
                 const SHIM_ALIASES: Record<string, string> = { 'adb': 'android', 'android': 'adb' };
@@ -536,16 +555,31 @@ async function main() {
         } else if (cmd === 'release') {
              const res = await shimRequest<any>(`${BROKER_URL}/api/lease/release`, { method: 'POST' }, { token });
              if (res.error) {
-                 process.stderr.write(`${getTimestamp()} [ARBITER] Could not connect to broker at ${BROKER_URL}. Is 'arbiter start' running?\n`);
+                 handleBrokerError(res, 'lease release');
                  process.exit(1);
              }
+             
              const yielded = res.data?.yielded;
+             const state = res.data?.release_state;
+             const artifactsPending = res.data?.artifacts_pending;
+
              if (yielded) {
-                 process.stdout.write("Release processed. The resource has been handed off or is draining for handoff.\n");
-                 process.stdout.write("Next: stop issuing resource commands with this lease token.\n");
-             } else {
-                 process.stdout.write("Release logged. Queue is empty, so the lease remains warm in AVAILABLE state.\n");
+                 if (state === 'DRAINING') {
+                    process.stdout.write("Release accepted: Resource is currently DRAINING (waiting for active permits to finish).\n");
+                    process.stdout.write("Exclusivity: Your lease is revoked, but the resource will not be available to others until permits finish.\n");
+                 } else {
+                    process.stdout.write("Release processed: The resource has been handed off to the next agent.\n");
+                 }
+                 if (artifactsPending) {
+                    process.stdout.write("Artifacts: Background artifact capture (logs/screenshots) is in progress.\n");
+                 }
+             } else if (state === 'AVAILABLE') {
+                 process.stdout.write("Release logged: Queue is empty, so the lease remains warm in AVAILABLE state.\n");
                  process.stdout.write("Next: either continue with more resource work, or remain idle and let the lease expire if all work is done.\n");
+             } else if (res.status === 404) {
+                 process.stdout.write("Release ignored: Token is already released or unknown to this broker instance.\n");
+             } else {
+                 process.stdout.write(`Release status: ${state || 'unknown'}. Yielded: ${yielded}\n`);
              }
              return;
         } else if (cmd === 'lease' && args[1] === 'status') {
@@ -705,11 +739,7 @@ async function main() {
                  if (progressIv) clearInterval(progressIv);
 
                  if (res.error) {
-                     if (res.error === 'ECONNREFUSED' || res.error === 'TIMEOUT') {
-                         process.stderr.write(`${getTimestamp()} [ARBITER] Could not connect to broker at ${BROKER_URL}. Is 'arbiter start' running?\n`);
-                     } else {
-                         process.stderr.write(`${getTimestamp()} [ARBITER] Broker request error: ${res.error}\n`);
-                     }
+                     handleBrokerError(res, 'lease request');
                      process.exit(1);
                  }
 
@@ -733,8 +763,12 @@ async function main() {
                              const secs = out.estimated_wait_seconds % 60;
                              process.stderr.write(`${getTimestamp()} [ARBITER] Estimated wait: ${mins}m ${secs}s\n`);
                          }
+                         if (out.wait_deadline_ms) {
+                             const deadline = new Date(out.wait_deadline_ms).toLocaleTimeString();
+                             process.stderr.write(`${getTimestamp()} [ARBITER] Bounded wait deadline: ${deadline}\n`);
+                         }
                          if (autoWait) {
-                             process.stderr.write(`${getTimestamp()} [ARBITER] Bounded wait threshold reached. Shifting to ticket polling...\n`);
+                             process.stderr.write(`${getTimestamp()} [ARBITER] Long wait detected. Shifting to ticket polling (ticket: ${out.token})...\n`);
                              pollTicket(out.token);
                              return;
                          }
