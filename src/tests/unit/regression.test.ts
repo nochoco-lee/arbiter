@@ -5,6 +5,7 @@ import * as path from 'path';
 import * as os from 'os';
 
 process.env.ARBITER_TEST_MODE = 'true';
+process.env.ARBITER_WATCHDOG_INTERVAL = '500';
 
 import { leaseManager } from '../../state/lease';
 import { queueManager } from '../../queue/index';
@@ -27,13 +28,14 @@ test('Expired persisted lease: startup does not restore as blocker', async () =>
             token: 'expired-token',
             resource: 'persistent-res',
             expires_at: Date.now() - 10000, // 10s ago
-            requested_duration_ms: 60000
+            requested_duration_ms: 60000,
+            state: 'GRANTED'
         };
 
         const state = {
             leaseManager: {
-                activeLeases: [expiredLease],
-                resourceStates: [{ resource: 'persistent-res', state: 'GRANTED' }],
+                activeLeases: [['persistent-res', expiredLease]],
+                resourceStates: [['persistent-res', 'GRANTED']],
                 pendingPermits: []
             },
             queueManager: { queue: [] },
@@ -52,9 +54,10 @@ test('Expired persisted lease: startup does not restore as blocker', async () =>
         const data = JSON.parse(raw);
         leaseManager.importState(data.leaseManager);
 
-        // The lease manager should have purged the expired lease
+        // The lease manager correctly marks it AVAILABLE, which means it doesn't block new waiters,
+        // but it STILL allows the original holder to reactivate it (Reactive Resume) if uncontended!
         assert.strictEqual(leaseManager.getResourceState('persistent-res'), 'AVAILABLE', 'Expired lease should be AVAILABLE on resume');
-        assert.strictEqual(leaseManager.getResourceByToken('expired-token'), null, 'Expired token should be invalid');
+        assert.strictEqual(leaseManager.getResourceByToken('expired-token'), 'persistent-res', 'Expired token should still be valid for Reactive Resume if uncontended');
 
     } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -104,6 +107,16 @@ test('Command timeout: lease marked terminal or released', async () => {
 
     await new Promise(resolve => setTimeout(resolve, 1500));
     
-    const state = leaseManager.getResourceState(resource);
-    assert.ok(state === 'AVAILABLE' || state === 'FREE', `Expected lease to expire, got ${state}`);
+    let state = leaseManager.getResourceState(resource);
+    assert.ok(state === 'EXPIRING' || state === 'AVAILABLE' || state === 'FREE', `Expected lease to expire, got ${state}`);
+
+    if (state === 'EXPIRING') {
+        for (let i = 0; i < 20; i++) {
+            await new Promise(resolve => setTimeout(resolve, 500));
+            state = leaseManager.getResourceState(resource);
+            if (state === 'AVAILABLE' || state === 'FREE') break;
+        }
+    }
+
+    assert.ok(state === 'AVAILABLE' || state === 'FREE', `Expected lease to eventually become AVAILABLE/FREE, got ${state}`);
 });

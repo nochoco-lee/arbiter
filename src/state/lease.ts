@@ -18,6 +18,7 @@ export interface LeaseInfo {
   extended?: boolean;
   requested_duration_ms: number;
   last_transition_reason?: string;
+  expiring_since?: number; // timestamp when lease first entered EXPIRING state
 }
 
 export interface DeadLeaseInfo {
@@ -152,6 +153,14 @@ export class LeaseManager {
     if (data.activeLeases) this.activeLeases = new Map(data.activeLeases);
     if (data.resourceStates) this.resourceStates = new Map(data.resourceStates);
     if (data.pendingPermits) this.pendingPermits = new Map(data.pendingPermits);
+
+    const now = Date.now();
+    for (const [resource, lease] of this.activeLeases.entries()) {
+        if (now > lease.expires_at && lease.state === 'GRANTED') {
+            lease.state = 'AVAILABLE';
+            this.resourceStates.set(resource, 'AVAILABLE');
+        }
+    }
   }
 
   public getActiveLeaseToken(resource: string): string | undefined {
@@ -433,8 +442,14 @@ export class LeaseManager {
               lease.last_heartbeat = Date.now();
               lease.last_activity_at = Date.now();
               lease.has_started = true;
-              // If it was expiring, resurrect it since we just got a heartbeat and queue is empty
-              if (lease.state === 'EXPIRING') {
+              if (lease.state === 'GRANTED') {
+                  // Heartbeat on a live lease: extend expires_at so the soft deadline doesn't
+                  // fire while the agent is actively signalling it is still working.
+                  const now = Date.now();
+                  lease.expires_at = now + lease.requested_duration_ms;
+                  lease.hard_deadline = lease.expires_at + 60000;
+              } else if (lease.state === 'EXPIRING') {
+                  // Lease already passed soft deadline — try to resurrect if uncontended.
                   this.resurrectIfPossible(lease);
               }
               return true;
@@ -722,6 +737,7 @@ export class LeaseManager {
               // 1. Soft Timeout detection: if we passed expires_at, block new commands!
               if (now > lease.expires_at && lease.state === 'GRANTED') {
                   lease.state = 'EXPIRING';
+                  lease.expiring_since = now;
                   lease.last_transition_reason = 'soft_timeout_reached';
                   log(`[Watchdog] Lease ${lease.token} moved to EXPIRING (Soft Cutoff Active)`);
               }
@@ -731,12 +747,27 @@ export class LeaseManager {
               if ((lease.state === 'EXPIRING' || lease.state === 'AVAILABLE') && queueDepth > 0) {
                   const resConfig = this.ceilingConfig?.[resource] || {};
                   const hbTimeout = resConfig.heartbeat_timeout_seconds || this.globalConfig?.heartbeat_timeout_seconds || 15;
-                  const isActivelyWorking = (now - lease.last_heartbeat < (hbTimeout * 1000)); 
+                  const isActivelyWorking = lease.has_started && (now - lease.last_heartbeat < (hbTimeout * 1000)); 
                   if (lease.state === 'AVAILABLE' || !isActivelyWorking) {
                       log(`[Watchdog] Lease ${lease.token} (${lease.state}) is contended. Reclaiming immediately.`);
                       // Universal DRAINING: Use force=false to allow draining if permits are running
                       await this.yieldLease({ token: lease.token, reason: 'expired_contention' }, false);
                       continue;
+                  }
+              }
+
+              // 2b. Quiet Expiry: EXPIRING lease with no waiters → move to AVAILABLE after a short grace.
+              // The grace period (ARBITER_QUIET_EXPIRY_GRACE_MS, default 5s) gives the holder a window to
+              // send a resurrection heartbeat (touchHeartbeat → resurrectIfPossible) before we give up.
+              // Under contention the heartbeat_timeout_seconds gate in step 2 handles this instead.
+              if (lease.state === 'EXPIRING' && queueDepth === 0) {
+                  const quietGraceMs = parseInt(process.env.ARBITER_QUIET_EXPIRY_GRACE_MS || '5000');
+                  const expiringSince = lease.expiring_since ?? now;
+                  if (now - expiringSince >= quietGraceMs) {
+                      log(`[Watchdog] Lease ${lease.token} EXPIRING with no waiters. Moving to AVAILABLE (quiet expiry).`);
+                      lease.state = 'AVAILABLE';
+                      lease.last_transition_reason = 'quiet_expiry';
+                      this.resourceStates.set(resource, 'AVAILABLE');
                   }
               }
 

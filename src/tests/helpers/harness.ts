@@ -109,6 +109,7 @@ export async function startBrokerWithEnv(port: number, env: Record<string, strin
 
     const brokerProc = spawn('node', brokerArgs, {
         env: {
+            ARBITER_WATCHDOG_INTERVAL: '1000',
             ...process.env,
             ...env,
             ARBITER_PORT: port.toString(), // 0 = OS assigns a free port

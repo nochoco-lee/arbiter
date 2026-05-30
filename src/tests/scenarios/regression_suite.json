@@ -1,6 +1,9 @@
 {
   "name": "Regression Suite",
   "runner": "json",
+  "config": {
+    "ARBITER_QUIET_EXPIRY_GRACE_MS": "2500"
+  },
   "steps": [
     {
       "action": "delay",
@@ -9,11 +12,18 @@
     },
     {
       "action": "request",
+      "agentId": "agent0",
+      "resourceSuffix": "reentrancy",
+      "duration": 1,
+      "description": "Agent 0 takes the resource briefly so that Agent 1 and Agent 2 actually queue behind it"
+    },
+    {
+      "action": "request",
       "agentId": "agent1",
       "resourceSuffix": "reentrancy",
       "wait": true,
       "background": true,
-      "description": "Agent 1 requests resource and blocks"
+      "description": "Agent 1 requests resource and blocks (queues behind Agent 0)"
     },
     {
       "action": "delay",
@@ -25,7 +35,7 @@
       "resourceSuffix": "reentrancy",
       "wait": true,
       "background": true,
-      "description": "Agent 2 requests resource and blocks"
+      "description": "Agent 2 requests resource and blocks (queues behind Agent 1)"
     },
     {
       "action": "delay",
@@ -34,7 +44,7 @@
     {
       "action": "poll_queue",
       "resourceSuffix": "reentrancy",
-      "waitForState": "BLOCKING",
+      "waitForState": "BLOCKING_WAIT",
       "description": "Wait for Agent 1 to be at the head of the queue"
     },
     {
@@ -43,16 +53,9 @@
       "queueDepth": 2
     },
     {
-      "action": "request",
-      "agentId": "agent0",
-      "resourceSuffix": "reentrancy",
-      "duration": 1,
-      "description": "Agent 0 takes the resource briefly to trigger a transition to AVAILABLE when finished"
-    },
-    {
       "action": "delay",
       "ms": 1500,
-      "comment": "Wait for Agent 0's lease to expire and trigger AVAILABLE state"
+      "comment": "Wait for Agent 0's 1s lease to expire and trigger AVAILABLE state"
     },
     {
       "action": "assert_broker_state",
@@ -132,7 +135,7 @@
       "ms": 5000
     },
     {
-      "action": "assert_broker_state",
+      "action": "wait_broker_state",
       "resourceSuffix": "remote",
       "expectedState": "AVAILABLE",
       "description": "Lease should eventually expire after heartbeat stops"
@@ -161,11 +164,10 @@
       "ms": 500
     },
     {
-      "action": "broker_request",
-      "endpoint": "/status",
+      "action": "assert_broker_state",
       "resourceSuffix": "hanging_cmd",
-      "expectStatus": 200,
-      "description": "Verify /status is still responsive during hanging command"
+      "expectedState": "GRANTED",
+      "description": "Verify /status is still responsive during hanging command and resource is GRANTED"
     }
   ]
 }
