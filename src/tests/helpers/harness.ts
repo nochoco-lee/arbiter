@@ -96,10 +96,14 @@ export async function startBrokerInstance(port: number): Promise<BrokerInstance>
     return startBrokerWithEnv(port, {});
 }
 
-export async function startBrokerWithEnv(port: number, env: Record<string, string>): Promise<BrokerInstance> {
+export async function startBrokerWithEnv(port: number, env: Record<string, string>, configYaml?: string): Promise<BrokerInstance> {
     const testDir = fs.mkdtempSync(path.join(os.tmpdir(), `arbiter-test-`));
     const tdbConfigFile = path.join(testDir, `tdb_config.json`);
     fs.writeFileSync(tdbConfigFile, JSON.stringify([]));
+
+    if (configYaml) {
+        fs.writeFileSync(path.join(testDir, 'arbiter.yaml'), configYaml);
+    }
 
     const tsNodeBin = require.resolve('ts-node/dist/bin.js');
     const brokerArgs = [
@@ -108,6 +112,7 @@ export async function startBrokerWithEnv(port: number, env: Record<string, strin
     ];
 
     const brokerProc = spawn('node', brokerArgs, {
+        cwd: testDir,
         env: {
             ARBITER_WATCHDOG_INTERVAL: '1000',
             ...process.env,
