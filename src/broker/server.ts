@@ -60,7 +60,7 @@ function resolveRemoteBin(resource: string): string {
         'adb':    '/usr/bin/adb',
         'sdb':    '/usr/bin/sdb',
         'simctl': '/usr/bin/xcrun',
-        'tdb':    `node ${pathModule.resolve(__dirname, '../tests/tdb.js')}`,
+        'tdb':    `node ${pathModule.resolve(__dirname, '../../node_modules/ts-node/dist/bin.js')} ${pathModule.resolve(__dirname, '../tests/tdb.ts')}`,
     };
     return defaults[resource] || `/usr/bin/${resource}`;
 }
