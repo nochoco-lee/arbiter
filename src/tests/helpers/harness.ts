@@ -19,7 +19,12 @@ export class BrokerInstance {
                 }
                 resolve();
             });
-            this.process.kill('SIGKILL');
+            if (process.platform === 'win32') {
+                const { spawnSync } = require('child_process');
+                spawnSync('taskkill', ['/pid', this.process.pid!.toString(), '/f', '/t']);
+            } else {
+                this.process.kill('SIGKILL');
+            }
         });
     }
 }

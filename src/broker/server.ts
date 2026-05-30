@@ -1,6 +1,8 @@
 import * as http from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { spawn } from 'child_process';
+import * as crypto from 'crypto';
+import * as os from 'os';
 
 // Node.js version check (Requires 18+)
 const [major] = process.versions.node.split('.').map(Number);
@@ -44,7 +46,7 @@ import { ConfigManager } from '../config/index';
 import { ContextManager } from '../context/index';
 import { log, warn, logBuffer, sseClients, debug } from './logger';
 import * as fs from 'fs';
-import * as path from 'path';
+import * as pathModule from 'path';
 
 const globalConfig = ConfigManager.loadConfig('arbiter.yaml');
 const PORT = parseInt(process.env.ARBITER_PORT || (globalConfig.port ? globalConfig.port.toString() : '38401'));
@@ -58,7 +60,7 @@ function resolveRemoteBin(resource: string): string {
         'adb':    '/usr/bin/adb',
         'sdb':    '/usr/bin/sdb',
         'simctl': '/usr/bin/xcrun',
-        'tdb':    `node ${path.resolve(__dirname, '../tests/tdb.js')}`,
+        'tdb':    `node ${pathModule.resolve(__dirname, '../tests/tdb.js')}`,
     };
     return defaults[resource] || `/usr/bin/${resource}`;
 }
@@ -125,7 +127,28 @@ export const startBroker = (options: { resume?: boolean } = {}) => {
   leaseManager.experimentalScheduling = true;
   queueManager.experimentalScheduling = true;
 
-  const stateFile = path.join(process.env.ARBITER_CONTEXT_DIR || process.cwd(), '.arbiter_broker_state.json');
+  // Background cleanup for abandoned temporary uploads/downloads
+  const uploadDir = pathModule.resolve(os.tmpdir(), 'arbiter-uploads');
+  setInterval(() => {
+      try {
+          if (fs.existsSync(uploadDir)) {
+              const files = fs.readdirSync(uploadDir);
+              const now = Date.now();
+              for (const file of files) {
+                  const fp = pathModule.join(uploadDir, file);
+                  const stat = fs.statSync(fp);
+                  if (now - stat.mtimeMs > 3600000) { // 1 hour
+                      fs.unlinkSync(fp);
+                      log(`[Broker] Cleaned up expired temporary file: ${file}`);
+                  }
+              }
+          }
+      } catch (e) {
+          warn(`[Broker] Temporary file cleanup error: ${e}`);
+      }
+  }, 600000); // run every 10 minutes
+
+  const stateFile = pathModule.join(process.env.ARBITER_CONTEXT_DIR || process.cwd(), '.arbiter_broker_state.json');
   if (options.resume) {
       try {
           if (fs.existsSync(stateFile)) {
@@ -811,7 +834,97 @@ export const startBroker = (options: { resume?: boolean } = {}) => {
             sseClients.add(res);
             req.on('close', () => sseClients.delete(res));
             req.on('error', () => sseClients.delete(res));
-            return; // keep connection open
+        }
+
+        if (req.method === 'POST' && path === '/api/remote/upload') {
+            const secret = process.env.ARBITER_AUTH_SECRET;
+            if (secret) {
+                const clientSecret = req.headers['x-arbiter-secret'];
+                if (clientSecret !== secret) {
+                    res.writeHead(401);
+                    res.end(JSON.stringify({ error: 'unauthorized' }));
+                    return;
+                }
+            }
+
+            const fileName = req.headers['x-file-name'] || 'file.bin';
+            const uploadDir = pathModule.resolve(os.tmpdir(), 'arbiter-uploads');
+            if (!fs.existsSync(uploadDir)) {
+                fs.mkdirSync(uploadDir, { recursive: true });
+            }
+
+            const cleanFileName = pathModule.basename(fileName.toString()).replace(/[^a-zA-Z0-9_.-]/g, '_');
+            const targetPath = pathModule.join(uploadDir, `${crypto.randomUUID()}-${cleanFileName}`);
+
+            const writeStream = fs.createWriteStream(targetPath);
+            req.pipe(writeStream);
+
+            req.on('error', (err) => {
+                writeStream.destroy();
+                try { fs.unlinkSync(targetPath); } catch {}
+                res.writeHead(500);
+                res.end(JSON.stringify({ error: `Upload error: ${err.message}` }));
+            });
+
+            writeStream.on('error', (err) => {
+                try { fs.unlinkSync(targetPath); } catch {}
+                res.writeHead(500);
+                res.end(JSON.stringify({ error: `Write error: ${err.message}` }));
+            });
+
+            writeStream.on('finish', () => {
+                res.writeHead(200);
+                res.end(JSON.stringify({ remotePath: targetPath }));
+            });
+            return;
+        }
+
+        if (req.method === 'GET' && path === '/api/remote/download') {
+            const secret = process.env.ARBITER_AUTH_SECRET;
+            if (secret) {
+                const clientSecret = req.headers['x-arbiter-secret'];
+                if (clientSecret !== secret) {
+                    res.writeHead(401);
+                    res.end(JSON.stringify({ error: 'unauthorized' }));
+                    return;
+                }
+            }
+
+            const requestedPath = urlObj.searchParams.get('path');
+            if (!requestedPath) {
+                res.writeHead(400);
+                return res.end(JSON.stringify({ error: 'missing_path' }));
+            }
+
+            const uploadDir = pathModule.resolve(os.tmpdir(), 'arbiter-uploads');
+            const targetPath = pathModule.resolve(requestedPath);
+
+            if (!targetPath.startsWith(uploadDir)) {
+                res.writeHead(400);
+                return res.end(JSON.stringify({ error: 'invalid_path' }));
+            }
+
+            if (!fs.existsSync(targetPath)) {
+                res.writeHead(404);
+                return res.end(JSON.stringify({ error: 'file_not_found' }));
+            }
+
+            res.writeHead(200, {
+                'Content-Type': 'application/octet-stream',
+                'Content-Disposition': `attachment; filename="${pathModule.basename(targetPath)}"`
+            });
+
+            const readStream = fs.createReadStream(targetPath);
+            readStream.pipe(res);
+
+            res.on('finish', () => {
+                try { fs.unlinkSync(targetPath); } catch {}
+            });
+
+            readStream.on('error', (err) => {
+                log(`[Broker] Error reading download file: ${err.message}`);
+            });
+            return;
         }
 
         res.writeHead(404);
@@ -830,6 +943,9 @@ export const startBroker = (options: { resume?: boolean } = {}) => {
   wss.on('connection', (ws: WebSocket) => {
       let child: ReturnType<typeof spawn> | null = null;
       let execToken: string | null = null;
+      let finalArgs: string[] = [];
+      let pulledFiles: string[] = [];
+      const uploadDir = pathModule.resolve(os.tmpdir(), 'arbiter-uploads');
 
       ws.on('message', (raw) => {
           let msg: any;
@@ -852,9 +968,24 @@ export const startBroker = (options: { resume?: boolean } = {}) => {
 
               const binPath = resolveRemoteBin(msg.resource || '');
               const binParts = binPath.split(' ');
-              log(`[Remote] exec ${msg.resource}: ${binParts[0]} ${(msg.args || []).join(' ')}`);
 
-              child = spawn(binParts[0], [...binParts.slice(1), ...(msg.args || [])], {
+              // Rewrite placeholders for pulled files
+              pulledFiles = [];
+              finalArgs = (msg.args || []).map((arg: string) => {
+                  if (arg === 'ARBITER_PULL_FILE') {
+                      if (!fs.existsSync(uploadDir)) {
+                          fs.mkdirSync(uploadDir, { recursive: true });
+                      }
+                      const p = pathModule.join(uploadDir, `pulled-${crypto.randomUUID()}.bin`);
+                      pulledFiles.push(p);
+                      return p;
+                  }
+                  return arg;
+              });
+
+              log(`[Remote] exec ${msg.resource}: ${binParts[0]} ${finalArgs.join(' ')}`);
+
+              child = spawn(binParts[0], [...binParts.slice(1), ...finalArgs], {
                   stdio: ['pipe', 'pipe', 'pipe'],
                   env: process.env
               });
@@ -880,13 +1011,41 @@ export const startBroker = (options: { resume?: boolean } = {}) => {
               child.on('exit', (code) => {
                   clearTimeout(timer);
                   log(`[Remote] exec exited with code ${code}`);
+
+                  // Auto-cleanup uploaded files (files that were inputs in finalArgs)
+                  for (const arg of finalArgs) {
+                      if (arg.startsWith(uploadDir) && !pulledFiles.includes(arg)) {
+                          try { fs.unlinkSync(arg); } catch {}
+                      }
+                  }
+
                   if (ws.readyState === WebSocket.OPEN) {
-                      ws.send(JSON.stringify({ type: 'exit', code: code ?? -1 }));
+                      ws.send(JSON.stringify({ 
+                          type: 'exit', 
+                          code: code ?? -1,
+                          pulledFiles: code === 0 ? pulledFiles : [] // only return pulled files on success
+                      }));
                       ws.close(1000);
+                  }
+
+                  // If code !== 0, clean up pulled files too because they won't be downloaded
+                  if (code !== 0) {
+                      for (const p of pulledFiles) {
+                          try { fs.unlinkSync(p); } catch {}
+                      }
                   }
               });
               child.on('error', (e: Error) => {
                   clearTimeout(timer);
+                  // Cleanup
+                  for (const arg of finalArgs) {
+                      if (arg.startsWith(uploadDir)) {
+                          try { fs.unlinkSync(arg); } catch {}
+                      }
+                  }
+                  for (const p of pulledFiles) {
+                      try { fs.unlinkSync(p); } catch {}
+                  }
                   ws.send(JSON.stringify({ type: 'error', message: `spawn failed: ${e.message}` }));
                   ws.close(1011);
               });
@@ -906,10 +1065,35 @@ export const startBroker = (options: { resume?: boolean } = {}) => {
       });
 
       ws.on('close', () => {
-          if (child && !child.killed) child.kill('SIGTERM');
+          if (child && !child.killed) {
+              child.kill('SIGTERM');
+              const c = child;
+              setTimeout(() => { if (c && !c.killed) c.kill('SIGKILL'); }, 1500).unref();
+          }
+          // Clean up uploaded input files only — do NOT delete pulled output files,
+          // as the shim still needs to download them after WS close.
+          if (finalArgs) {
+              for (const arg of finalArgs) {
+                  if (arg.startsWith(uploadDir) && !pulledFiles.includes(arg)) {
+                      try { fs.unlinkSync(arg); } catch {}
+                  }
+              }
+          }
       });
       ws.on('error', () => {
-          if (child && !child.killed) child.kill('SIGTERM');
+          if (child && !child.killed) {
+              child.kill('SIGTERM');
+              const c = child;
+              setTimeout(() => { if (c && !c.killed) c.kill('SIGKILL'); }, 1500).unref();
+          }
+          // On error, pulled files won't be downloaded — clean them up too
+          if (finalArgs) {
+              for (const arg of finalArgs) {
+                  if (arg.startsWith(uploadDir)) {
+                      try { fs.unlinkSync(arg); } catch {}
+                  }
+              }
+          }
       });
   });
 

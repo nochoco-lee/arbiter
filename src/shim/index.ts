@@ -267,7 +267,90 @@ HOW TO RUN CODING AGENTS:
 }
 
 // --- Remote Broker Execution via WebSocket ---
-async function remoteExec(wsUrl: string, token: string, resource: string, args: string[]): Promise<void> {
+// --- Helper functions for remote file transfers ---
+async function uploadFile(brokerUrl: string, localPath: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+        const urlObj = new URL(`${brokerUrl}/api/remote/upload`);
+        const headers: Record<string, string> = {
+            'Content-Type': 'application/octet-stream',
+            'x-file-name': path.basename(localPath)
+        };
+        if (process.env.ARBITER_AUTH_SECRET) {
+            headers['x-arbiter-secret'] = process.env.ARBITER_AUTH_SECRET;
+        }
+
+        const req = http.request({
+            hostname: urlObj.hostname,
+            port: urlObj.port,
+            path: urlObj.pathname + urlObj.search,
+            method: 'POST',
+            headers
+        }, (res) => {
+            let data = '';
+            res.on('data', d => data += d);
+            res.on('end', () => {
+                if (res.statusCode === 200) {
+                    try {
+                        const parsed = JSON.parse(data);
+                        if (parsed.remotePath) {
+                            resolve(parsed.remotePath);
+                        } else {
+                            reject(new Error('Invalid upload response'));
+                        }
+                    } catch (e) {
+                        reject(new Error('Failed to parse upload response'));
+                    }
+                } else {
+                    reject(new Error(`Upload failed with status ${res.statusCode}: ${data}`));
+                }
+            });
+        });
+
+        req.on('error', (e: Error) => reject(e));
+
+        const readStream = fs.createReadStream(localPath);
+        readStream.pipe(req);
+    });
+}
+
+async function downloadFile(brokerUrl: string, remotePath: string, localPath: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+        const urlObj = new URL(`${brokerUrl}/api/remote/download?path=${encodeURIComponent(remotePath)}`);
+        const headers: Record<string, string> = {};
+        if (process.env.ARBITER_AUTH_SECRET) {
+            headers['x-arbiter-secret'] = process.env.ARBITER_AUTH_SECRET;
+        }
+
+        const req = http.request({
+            hostname: urlObj.hostname,
+            port: urlObj.port,
+            path: urlObj.pathname + urlObj.search,
+            method: 'GET',
+            headers
+        }, (res) => {
+            if (res.statusCode === 200) {
+                const localDir = path.dirname(path.resolve(localPath));
+                if (!fs.existsSync(localDir)) {
+                    fs.mkdirSync(localDir, { recursive: true });
+                }
+                const writeStream = fs.createWriteStream(localPath);
+                res.pipe(writeStream);
+                writeStream.on('finish', () => resolve());
+                writeStream.on('error', (e: Error) => reject(e));
+            } else {
+                let data = '';
+                res.on('data', d => data += d);
+                res.on('end', () => reject(new Error(`Download failed with status ${res.statusCode}: ${data}`)));
+            }
+        });
+
+        req.on('error', (e: Error) => reject(e));
+        req.end();
+    });
+}
+
+// --- Remote Broker Execution via WebSocket ---
+async function remoteExec(wsUrl: string, token: string, resource: string, args: string[], pulledFilesLocalTargets: string[] = [], brokerUrl: string = ''): Promise<void> {
     const WebSocket = require('ws');
     return new Promise((resolve, reject) => {
         const headers: Record<string, string> = {};
@@ -275,11 +358,34 @@ async function remoteExec(wsUrl: string, token: string, resource: string, args: 
             headers['x-arbiter-secret'] = process.env.ARBITER_AUTH_SECRET;
         }
         const ws = new WebSocket(`${wsUrl}/api/remote/exec`, { headers });
+        let isTtyActive = false;
+        let done = false;
+        // Tracks the in-progress file download(s) so ws.on('close') can wait for them
+        // before resolving the outer promise (avoiding a race with the broker close frame).
+        let pendingDownloads: Promise<void> = Promise.resolve();
+
+        const cleanup = () => {
+            if (done) return;
+            done = true;
+            clearInterval(hbInterval);
+            if (isTtyActive && process.stdin.isTTY) {
+                process.stdin.setRawMode(false);
+            }
+            resolve();
+        };
+
 
         ws.on('open', () => {
             ws.send(JSON.stringify({ type: 'exec', token, resource, args }));
             // Forward local stdin to the remote process
-            if (!process.stdin.isTTY) {
+            if (process.stdin.isTTY) {
+                isTtyActive = true;
+                process.stdin.setRawMode(true);
+                process.stdin.on('data', (d: Buffer) => {
+                    if (ws.readyState === WebSocket.OPEN)
+                        ws.send(JSON.stringify({ type: 'stdin', data: d.toString('base64') }));
+                });
+            } else {
                 process.stdin.on('data', (d: Buffer) => {
                     if (ws.readyState === WebSocket.OPEN)
                         ws.send(JSON.stringify({ type: 'stdin', data: d.toString('base64') }));
@@ -302,29 +408,67 @@ async function remoteExec(wsUrl: string, token: string, resource: string, args: 
             try { msg = JSON.parse(raw.toString()); } catch { return; }
             if (msg.type === 'stdout') process.stdout.write(Buffer.from(msg.data, 'base64'));
             if (msg.type === 'stderr') process.stderr.write(Buffer.from(msg.data, 'base64'));
-            if (msg.type === 'exit')   { process.exitCode = msg.code ?? 0; ws.close(); }
-            if (msg.type === 'error')  {
+            if (msg.type === 'exit') {
+                process.exitCode = msg.code ?? 0;
+
+                // Start file downloads — store the promise so ws.on('close') can wait for it.
+                // We must NOT await here: the broker's WS close frame may arrive concurrently
+                // and trigger ws.on('close') before an inline await would finish.
+                if (process.exitCode === 0 && msg.pulledFiles && msg.pulledFiles.length > 0 && brokerUrl) {
+                    pendingDownloads = (async () => {
+                        for (let i = 0; i < msg.pulledFiles.length; i++) {
+                            const remoteFile = msg.pulledFiles[i];
+                            const localFile = pulledFilesLocalTargets[i];
+                            if (localFile) {
+                                try {
+                                    await downloadFile(brokerUrl, remoteFile, localFile);
+                                } catch (e: any) {
+                                    process.stderr.write(`${getTimestamp()} [ARBITER REMOTE] Failed to download pulled file: ${e.message}\n`);
+                                    process.exitCode = 1;
+                                }
+                            }
+                        }
+                    })();
+                }
+                // Do NOT call ws.close() here — the broker already sent a close frame.
+                // ws.on('close') will fire naturally and await pendingDownloads before resolving.
+            }
+            if (msg.type === 'error') {
                 process.stderr.write(`${getTimestamp()} [ARBITER REMOTE] ${msg.message}\n`);
                 process.exitCode = 1;
                 ws.close();
             }
         });
 
+        // Wait for any in-progress file downloads to complete before resolving.
+        // This is essential: the broker closes the WS immediately after sending the
+        // 'exit' message, so the close event can fire while downloadFile is still running.
         ws.on('close', () => {
-            clearInterval(hbInterval);
-            resolve();
+            pendingDownloads.then(() => cleanup());
         });
         ws.on('error', (e: Error) => {
-            clearInterval(hbInterval);
             process.stderr.write(`${getTimestamp()} [ARBITER REMOTE] Connection to ${wsUrl} failed: ${e.message}\n`);
             process.stderr.write(`${getTimestamp()} [ARBITER REMOTE] Ensure the broker is running on the remote host with ARBITER_BIND set.\n`);
-            reject(e);
+            process.exitCode = 1;
+            cleanup();
+        });
+        // The 'ws' library emits 'unexpected-response' (not 'error') when the HTTP
+        // upgrade is rejected with a non-101 status such as 401 Unauthorized.
+        ws.on('unexpected-response', (req: any, res: any) => {
+            process.stderr.write(`${getTimestamp()} [ARBITER REMOTE] Broker rejected WebSocket upgrade: HTTP ${res.statusCode}\n`);
+            if (res.statusCode === 401) {
+                process.stderr.write(`${getTimestamp()} [ARBITER REMOTE] Authentication failed — check ARBITER_AUTH_SECRET.\n`);
+            }
+            process.exitCode = 1;
+            res.resume(); // drain response body so socket can close cleanly
+            cleanup();
         });
 
         // Forward Ctrl+C as a signal to the remote process rather than killing locally
         const sigHandler = () => ws.send(JSON.stringify({ type: 'signal', signal: 'SIGINT' }));
         process.on('SIGINT', sigHandler);
         ws.on('close', () => process.removeListener('SIGINT', sigHandler));
+
     });
 }
 
@@ -1255,9 +1399,76 @@ async function main() {
         clearInterval(hb); // WS messages touch heartbeat server-side; no local polling needed
         process.stderr.write(`${getTimestamp()} [ARBITER] Routing execution to remote broker at ${callerBrokerHost}\n`);
         try {
-            await remoteExec(callerBrokerWsUrl, token!, caller, args);
+            const finalArgs = [...args];
+            const pulledFilesLocalTargets: string[] = [];
+
+            // Upload local files transparently
+            for (let i = 0; i < finalArgs.length; i++) {
+                const arg = finalArgs[i];
+                try {
+                    if (arg && typeof arg === 'string' && fs.existsSync(arg) && fs.statSync(arg).isFile()) {
+                        const isPullDest = (caller === 'adb' && args[0] === 'pull' && i === args.length - 1);
+                        const isBugreportDest = (caller === 'adb' && args[0] === 'bugreport' && i === args.length - 1);
+                        if (!isPullDest && !isBugreportDest) {
+                            process.stderr.write(`${getTimestamp()} [ARBITER] Uploading local file '${arg}' to remote broker...\n`);
+                            const remotePath = await uploadFile(callerBrokerUrl, arg);
+                            finalArgs[i] = remotePath;
+                        }
+                    }
+                } catch (e) {}
+            }
+
+            // Handle file downloading (adb pull / adb bugreport)
+            if (caller === 'adb' && finalArgs[0] === 'pull') {
+                if (finalArgs.length >= 2) {
+                    const lastArgIdx = finalArgs.length - 1;
+                    const lastArg = finalArgs[lastArgIdx];
+                    let localPath = lastArg;
+                    if (!lastArg.startsWith('-') && lastArgIdx > 1) {
+                        try {
+                            if (fs.existsSync(localPath) && fs.statSync(localPath).isDirectory()) {
+                                const remoteFile = finalArgs[lastArgIdx - 1];
+                                localPath = path.join(localPath, path.basename(remoteFile));
+                            }
+                        } catch {}
+                        pulledFilesLocalTargets.push(localPath);
+                        finalArgs[lastArgIdx] = 'ARBITER_PULL_FILE';
+                    } else {
+                        const remoteFile = finalArgs[lastArgIdx];
+                        const defaultPath = path.join(process.cwd(), path.basename(remoteFile));
+                        pulledFilesLocalTargets.push(defaultPath);
+                        finalArgs.push('ARBITER_PULL_FILE');
+                    }
+                }
+            } else if (caller === 'adb' && finalArgs[0] === 'bugreport') {
+                if (finalArgs.length >= 2) {
+                    const lastArgIdx = finalArgs.length - 1;
+                    const lastArg = finalArgs[lastArgIdx];
+                    if (!lastArg.startsWith('-') && lastArgIdx > 0) {
+                        let localPath = lastArg;
+                        try {
+                            if (fs.existsSync(localPath) && fs.statSync(localPath).isDirectory()) {
+                                localPath = path.join(localPath, 'bugreport.zip');
+                            }
+                        } catch {}
+                        pulledFilesLocalTargets.push(localPath);
+                        finalArgs[lastArgIdx] = 'ARBITER_PULL_FILE';
+                    } else {
+                        const defaultPath = path.join(process.cwd(), 'bugreport.zip');
+                        pulledFilesLocalTargets.push(defaultPath);
+                        finalArgs.push('ARBITER_PULL_FILE');
+                    }
+                } else {
+                    const defaultPath = path.join(process.cwd(), 'bugreport.zip');
+                    pulledFilesLocalTargets.push(defaultPath);
+                    finalArgs.push('ARBITER_PULL_FILE');
+                }
+            }
+
+            await remoteExec(callerBrokerWsUrl, token!, caller, finalArgs, pulledFilesLocalTargets, callerBrokerUrl);
             process.exit(process.exitCode || 0);
         } catch (e: any) {
+            process.stderr.write(`${getTimestamp()} [ARBITER REMOTE] Execution error: ${e.message}\n`);
             process.exit(1);
         }
         return;
