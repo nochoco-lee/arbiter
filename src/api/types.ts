@@ -31,7 +31,7 @@ export interface YieldRequest {
   context?: ArbiterContext;
 }
 
-export type ResourceState = 'FREE' | 'REQUESTED' | 'GRANTED' | 'EXPIRING' | 'RELEASED' | 'AVAILABLE' | 'DRAINING';
+export type ResourceState = 'FREE' | 'GRANTED' | 'EXPIRING' | 'AVAILABLE' | 'DRAINING';
 
 export interface StatusResponse {
   resource: string;

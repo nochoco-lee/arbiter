@@ -43,7 +43,6 @@ src/
   cli/            Terminal UI (tui.ts) and doctor diagnostics
   config/         arbiter.yaml loader with graceful fallback
   context/        Session artifact persistence
-  mcp/            Model Context Protocol server integration
   queue/          Smart scheduling queue engine
   shim/           CLI entry point and shim interceptor logic
   state/          LeaseManager — core lease lifecycle state machine
@@ -137,7 +136,7 @@ Adapters define how Arbiter captures artifacts (logs, screenshots) when a lease 
    resources:
      mytool:
        type: mytool
-       max_duration_seconds: 300
+       max_lease_seconds: 300
    ```
 
 ---

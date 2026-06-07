@@ -10,13 +10,14 @@ export interface ResourceConfig {
     config?: string;
     port?: string;
     baud?: number;
-    max_duration_seconds?: number; // Backward-compatible alias for max_lease_seconds
     max_lease_seconds?: number;
     default_lease_seconds?: number;
     heartbeat_timeout_seconds?: number;
     // How long (seconds) before an unresolved pending permit is auto-denied.
     // Default: 30. Set to 0 to disable auto-deny (manual resolve only).
     permit_auto_deny_seconds?: number;
+    command_timeout_seconds?: number;
+    command_timeout_exceptions?: string[];
 }
 
 export interface ArbiterConfig {
@@ -46,15 +47,6 @@ export class ConfigManager {
             if (!data) return { resources: {} };
             if (!data.resources) data.resources = {};
 
-            // Backward compatibility and normalization
-            for (const res of Object.keys(data.resources)) {
-                const config = data.resources[res];
-                // max_duration_seconds is an alias for max_lease_seconds
-                if (config.max_duration_seconds && !config.max_lease_seconds) {
-                    config.max_lease_seconds = config.max_duration_seconds;
-                }
-            }
-            
             return data;
         } catch (e) {
             console.warn(`[ARBITER] Warning: Failed to parse ${absolutePath}: ${e}. Using safe defaults.`);

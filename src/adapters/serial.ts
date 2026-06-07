@@ -1,5 +1,4 @@
 import { Adapter, AdapterConfig } from './types';
-import { SerialPort } from 'serialport';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -11,16 +10,23 @@ export interface SerialAdapterConfig extends AdapterConfig {
 
 export class SerialAdapter implements Adapter {
     private config!: SerialAdapterConfig;
-    private port!: SerialPort;
+    private port!: any;
     private logBuffer: string = "";
 
     async connect(config: SerialAdapterConfig): Promise<void> {
         this.config = config;
         if (!config.port) throw new Error("Serial config missing 'port'");
 
-        this.port = new SerialPort({ path: config.port, baudRate: config.baud || 115200 });
+        let SerialPortClass;
+        try {
+            SerialPortClass = require('serialport').SerialPort;
+        } catch (e) {
+            throw new Error("The 'serialport' package is required to use the SerialAdapter. Run 'npm install serialport' to use this feature.");
+        }
 
-        this.port.on('data', (data) => {
+        this.port = new SerialPortClass({ path: config.port, baudRate: config.baud || 115200 });
+
+        this.port.on('data', (data: any) => {
             this.logBuffer += data.toString();
         });
     }
@@ -28,7 +34,8 @@ export class SerialAdapter implements Adapter {
     async execute(args: string[]): Promise<{ stdout: string; stderr: string; exitCode: number; }> {
         const command = args.join(' ');
         return new Promise((resolve, reject) => {
-            this.port.write(command + '\r\n', (err) => {
+            if (!this.port) return reject(new Error("SerialPort not connected"));
+            this.port.write(command + '\r\n', (err: any) => {
                 if (err) return reject(err);
                 resolve({ stdout: "Command written to serial port", stderr: "", exitCode: 0 });
             });
@@ -37,7 +44,8 @@ export class SerialAdapter implements Adapter {
 
     async stream(args: string[], onData: (data: string) => void): Promise<void> {
         const command = args.join(' ');
-        this.port.on('data', (d) => onData(d.toString()));
+        if (!this.port) throw new Error("SerialPort not connected");
+        this.port.on('data', (d: any) => onData(d.toString()));
         this.port.write(command + '\r\n');
     }
 
@@ -53,7 +61,7 @@ export class SerialAdapter implements Adapter {
     }
 
     async disconnect(): Promise<void> {
-        if (this.port.isOpen) {
+        if (this.port && this.port.isOpen) {
             this.port.close();
         }
     }

@@ -43,7 +43,7 @@ export class LeaseManager {
   public onResourceFree?: (res: string) => void;
   public ceilingConfig?: Record<string, any>;
   public globalConfig?: ArbiterConfig;
-  public experimentalScheduling: boolean = false;
+  public experimentalScheduling: boolean = true;
 
   // Diagnostics
   public lastWatchdogRun: number = 0;
@@ -292,7 +292,7 @@ export class LeaseManager {
       const original = duration;
 
       // 2. Resolve hard cap (max)
-      const hardCap = config.max_lease_seconds || config.max_duration_seconds || this.globalConfig?.max_lease_seconds || this.globalConfig?.global_ceiling_seconds;
+      const hardCap = config.max_lease_seconds || this.globalConfig?.max_lease_seconds || this.globalConfig?.global_ceiling_seconds;
       
       if (hardCap) {
           duration = Math.min(duration, hardCap);
