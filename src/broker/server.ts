@@ -203,11 +203,52 @@ export const startBroker = (options: { resume?: boolean } = {}) => {
       const defLease = globalConfig.default_lease_seconds || 300;
       const maxLease = globalConfig.max_lease_seconds || globalConfig.global_ceiling_seconds || 'unlimited';
       const hbTimeout = globalConfig.heartbeat_timeout_seconds || 15;
+
+      // --- Async Ticket Mode ---
+      // Precedence: env var (runtime override) > yaml config (persistent default) > 0 (disabled).
+      // ARBITER_TICKET_THRESHOLD_WAIT being set explicitly in the environment always wins,
+      // allowing operators/CI to override the yaml config without editing files.
+      const envThreshold = process.env.ARBITER_TICKET_THRESHOLD_WAIT;
+      const asyncThresholdSecs = envThreshold !== undefined
+          ? (parseInt(envThreshold) || 0)
+          : (globalConfig.async_ticket_threshold_seconds ?? 0);
+      queueManager.asyncTicketThresholdMs = asyncThresholdSecs * 1000;
+      if (asyncThresholdSecs > 0) {
+          const source = envThreshold !== undefined ? 'ARBITER_TICKET_THRESHOLD_WAIT env var' : 'async_ticket_threshold_seconds config';
+          log(`[Broker] Async Ticket Mode ENABLED (threshold: ${asyncThresholdSecs}s, source: ${source}).`);
+      } else {
+          log(`[Broker] Async Ticket Mode DISABLED (blocking-only). Set async_ticket_threshold_seconds in arbiter.yaml to enable.`);
+      }
+
       
       log(`[Broker] Effective Global Defaults: default_lease=${defLease}s, max_lease=${maxLease}s, heartbeat_timeout=${hbTimeout}s`);
   } catch(e: any) {
       log(`[Broker] Notice: No explicit arbiter.yaml mapped. Using internal defaults.`);
   }
+
+  // --- Permit Auto-Deny Watchdog ---
+  // Deny any PENDING permit that has not been resolved within permit_auto_deny_seconds (default: 30).
+  // This prevents agents from getting stuck waiting forever on a permit that nobody resolves.
+  // Safe default: auto-deny keeps the lease system exclusive (two agents never run simultaneously).
+  setInterval(() => {
+      const resources = leaseManager.getAllResources();
+      for (const resource of resources) {
+          const permits = leaseManager.getPermitsForResource(resource);
+          if (!permits) continue;
+          const resourceCfg = globalConfig.resources?.[resource] || globalConfig.resources?.['default'];
+          const autoDelaySecs = resourceCfg?.permit_auto_deny_seconds ?? 30;
+          if (autoDelaySecs <= 0) continue; // disabled for this resource
+          const now = Date.now();
+          for (const [id, permit] of Object.entries(permits)) {
+              if (permit.status === 'PENDING' && now > permit.expires_at) {
+                  warn(`[Broker] Permit auto-denied (timed out after ${autoDelaySecs}s): id=${id}, resource=${resource}`);
+                  // Resolve as denied — leaseManager.resolvePermit with grant=false
+                  // We call with a dummy token for the resource owner since auto-deny needs no owner token.
+                  leaseManager.autoExpirePermit(id, resource);
+              }
+          }
+      }
+  }, 5000);
 
   const server = http.createServer(async (req: http.IncomingMessage, res: http.ServerResponse) => {
     res.setHeader('Content-Type', 'application/json');
@@ -424,21 +465,31 @@ export const startBroker = (options: { resume?: boolean } = {}) => {
                 log(`[Broker] Resource ${body.resource} busy (${currentState}). Enqueuing requester...`);
             }
 
-            // Bounded Blocking: If the request is expected to wait longer than the threshold, 
-            // we return 202 RESERVED immediately if it's not granted right away.
-            const thresholdWaitMs = parseInt(process.env.ARBITER_TICKET_THRESHOLD_WAIT || '180') * 1000;
-            const estimatedWait = queueManager.getEstimatedWait(body.resource) * 1000;
-            
-            // Compatibility for older API callers: default allow_conflict to BLOCKING
-            if (body.allow_conflict && !body.wait_mode) {
-                body.wait_mode = 'BLOCKING';
-            }
+            // Bounded Blocking: Only promote to ASYNC ticket when async mode is explicitly enabled.
+            // When disabled (asyncTicketThresholdMs = 0, the default), every request blocks
+            // until the lease is granted — no 202 responses, no ticket IDs.
+            if (queueManager.asyncTicketThresholdMs > 0) {
+                const thresholdWaitMs = queueManager.asyncTicketThresholdMs;
+                const estimatedWait = queueManager.getEstimatedWait(body.resource) * 1000;
+                
+                // Compatibility for older API callers: default allow_conflict to BLOCKING
+                if (body.allow_conflict && !body.wait_mode) {
+                    body.wait_mode = 'BLOCKING';
+                }
 
-            if (estimatedWait > thresholdWaitMs && body.wait_mode !== 'BLOCKING' && currentState !== 'FREE' && currentState !== 'AVAILABLE') {
-                // If the user didn't EXPLICITLY ask for BLOCKING, and it's going to be long,
-                // and the resource isn't immediately ready to be grabbed (preempted),
-                // we treat it as ASYNC to be safe and avoid HTTP timeouts.
-                body.wait_mode = 'ASYNC';
+                if (estimatedWait > thresholdWaitMs && body.wait_mode !== 'BLOCKING' && currentState !== 'FREE' && currentState !== 'AVAILABLE') {
+                    // If the user didn't EXPLICITLY ask for BLOCKING, and it's going to be long,
+                    // and the resource isn't immediately ready to be grabbed (preempted),
+                    // we treat it as ASYNC to be safe and avoid HTTP timeouts.
+                    body.wait_mode = 'ASYNC';
+                }
+            } else {
+                // Async mode is off: always block, regardless of what caller requested.
+                // Compatibility for older API callers: default allow_conflict to BLOCKING
+                if (body.allow_conflict && !body.wait_mode) {
+                    body.wait_mode = 'BLOCKING';
+                }
+                body.wait_mode = 'BLOCKING';
             }
 
             const token = await queueManager.enqueue(body as unknown as LeaseRequest);

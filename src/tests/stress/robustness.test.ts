@@ -111,7 +111,7 @@ test('Robustness: High Concurrency, Restarts, and Hanging Commands', { timeout: 
 
 test('Robustness: Real-world scenario with timeouts and queuing', { timeout: 120000 }, async (t) => {
     const port = 0;
-    const yamlConfig = `default_lease_seconds: 30\n`;
+    const yamlConfig = `default_lease_seconds: 30\nasync_ticket_threshold_seconds: 180\n`;
     
     // Broker with 30s session timeout, 10s initial inactivity timeout
     const broker = await startBrokerWithEnv(port, { ARBITER_INITIAL_INACTIVITY_TIMEOUT: '10000' }, yamlConfig);

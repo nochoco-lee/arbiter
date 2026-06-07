@@ -544,13 +544,19 @@ export class LeaseManager {
 
        const permitId = 'permit_' + randomUUID().substring(0, 8);
        
+       const resourceCfg = this.globalConfig?.resources?.[resource] || this.globalConfig?.resources?.['default'];
+       const autoDenySecs = resourceCfg?.permit_auto_deny_seconds ?? 30;
+       const expiryWindowMs = autoDenySecs > 0 ? (autoDenySecs * 1000) : 600000; // 10 minutes if disabled/0
+
        const permit = {
            id: permitId,
            resource,
            commands,
            status: isAutoGrant ? 'GRANTED' : 'PENDING',
            executionStatus: 'NOT_STARTED' as any,
-           expires_at: Date.now() + 600000, // 10 minutes valid
+           // Expiry window: permit_auto_deny_seconds (default: 30) so the auto-deny watchdog can act quickly.
+           // If the owner explicitly resolves it before expiry, the permit lives on.
+           expires_at: Date.now() + expiryWindowMs,
            granted_at: isAutoGrant ? Date.now() : undefined,
            permit_token: isAutoGrant ? 'tok_' + permitId : undefined
        };
@@ -602,6 +608,20 @@ export class LeaseManager {
            }
        }
        return null;
+  }
+
+  /**
+   * Automatically deny a PENDING permit that has timed out without owner action.
+   * Called by the broker's permit-auto-deny watchdog.
+   * Safe to call even if the permit is no longer present (no-op).
+   */
+  public autoExpirePermit(permitId: string, resource: string): void {
+      const permits = this.pendingPermits.get(resource);
+      if (!permits || !permits[permitId]) return;
+      const p = permits[permitId];
+      if (p.status !== 'PENDING') return; // already resolved
+      p.status = 'DENIED';
+      log(`[Permit] Auto-expired (DENIED): id=${permitId}, resource=${resource}`);
   }
 
   public getPendingPermits(leaseToken: string): any[] {

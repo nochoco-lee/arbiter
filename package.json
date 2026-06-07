@@ -54,7 +54,6 @@
     "typescript": "^5.0.0"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
     "arg": "^5.0.2",
     "blessed": "^0.1.81",
     "js-yaml": "^4.1.1",

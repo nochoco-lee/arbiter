@@ -44,38 +44,59 @@ If you run a device command without an active lease, Arbiter will intercept it a
 > \`[ARBITER SHIM] State: no ARBITER_LEASE_TOKEN is set for this session.\`
 > \`[ARBITER SHIM] Next: request a lease before running...\`
 
-## 3. Acquiring a Lease
-Request an exclusive lease using the Arbiter CLI. The \`--wait\` flag will block until the resource is free rather than failing immediately:
+## 3. Acquiring a Lease (Blocking — Default)
+Request an exclusive lease using the Arbiter CLI. By default, \`arbiter request\` **blocks until the resource is granted** (FIFO queue) — no async handling is needed. The \`--wait\` flag additionally prints queue progress while waiting:
 \`\`\`bash
 arbiter request <resource_name> --wait
 # Example for Android: arbiter request adb --wait
 # Example for Tizen:   arbiter request sdb --wait
 \`\`\`
+The command will print your lease token once it is your turn. If other agents hold the resource, the command will simply wait — this is expected and correct behaviour.
 
 ## 4. Providing the Token to Commands
 The \`arbiter request\` command outputs your lease token. Because coding agents often spawn a new, isolated shell session for each command, **exporting the token once may not persist** to subsequent commands. The most reliable approach is to provide the token in the same line for *every* device command you run:
 
 **Linux/macOS:**
 \`\`\`bash
-ARBITER_LEASE_TOKEN=eyJhbGci... adb logcat
-# Or chain it:
-export ARBITER_LEASE_TOKEN=eyJhbGci... && adb logcat
+ARBITER_LEASE_TOKEN=<token> adb logcat
+# Or export first:
+export ARBITER_LEASE_TOKEN=<token> && adb logcat
 \`\`\`
 
 **Windows (PowerShell):**
 \`\`\`powershell
-$env:ARBITER_LEASE_TOKEN="eyJhbGci..."; adb logcat
+$env:ARBITER_LEASE_TOKEN="<token>"; adb logcat
 \`\`\`
 
 **Windows (Command Prompt):**
 \`\`\`cmd
-set ARBITER_LEASE_TOKEN=eyJhbGci... && adb logcat
+set ARBITER_LEASE_TOKEN=<token> && adb logcat
 \`\`\`
 
 ## 5. Releasing the Lease
 When you have completely finished all device interactions for the task, release the lease so other agents or developers can use the hardware:
 \`\`\`bash
 arbiter release
+\`\`\`
+
+---
+
+## Advanced: Async Ticket Mode (broker opt-in only)
+
+> **Note:** This section only applies if the broker has been explicitly configured with \`async_ticket_threshold_seconds\` in \`arbiter.yaml\`. In the default (blocking-only) configuration, \`arbiter request\` will never return a ticket — it blocks until the lease is granted.
+
+If \`arbiter request\` returns a **ticket ID** (the response will say "Async Reservation Created" with a \`q_...\` ID), your broker has async mode enabled. This means your place in the queue is reserved, but the resource is not yet free:
+
+1. **Continue non-device work** while the ticket is pending.
+2. **Claim the ticket** when the resource is likely ready:
+\`\`\`bash
+arbiter request --ticket <ticket_id> --wait
+\`\`\`
+3. Once claimed, export the lease token and proceed with device commands as normal.
+
+If you receive a ticket unexpectedly and are unsure how to proceed, you can always fall back to a straightforward blocking request — it will always work regardless of broker configuration:
+\`\`\`bash
+arbiter request <resource_name> --wait
 \`\`\`
 `;
 

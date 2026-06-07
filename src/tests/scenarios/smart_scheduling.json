@@ -2,6 +2,9 @@
   "name": "Integration Smart Scheduling",
   "runner": "integration",
   "description": "Tests full ecosystem scheduling via real CLI commands: capturing ASYNC tickets, submitting permits interactively via CLI, resolving via CLI, and claiming explicitly.",
+  "config": {
+    "ARBITER_TICKET_THRESHOLD_WAIT": "180"
+  },
   "steps": [
     {
       "action": "cli_request",

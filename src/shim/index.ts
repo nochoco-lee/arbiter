@@ -189,10 +189,12 @@ COMMANDS:
     --limit <n>          Print last N lines (default: 200, max: 500).
 
   request <resource>     Request a lease for a resource (e.g., android, adb).
+                         Blocks until the resource is granted (FIFO queue).
     --duration <secs>    How long you need the resource (default: 300s).
-    --wait               Block and wait until the resource is granted.
-    --async              Request an asynchronous reservation ticket instead of blocking.
-    --ticket <id>        Claim an existing reservation ticket (blocks if not ready).
+    --wait               Block and wait until the resource is granted (default behaviour).
+    --async              Request an async reservation ticket instead of blocking.
+                         Requires async_ticket_threshold_seconds to be set in arbiter.yaml.
+    --ticket <id>        Claim an existing reservation ticket (returns error if not ready yet).
 
   release                Voluntarily release the current lease.
   extend                 Request to extend the current lease duration.
@@ -224,7 +226,8 @@ ENVIRONMENT:
   ARBITER_PORT           Communication port between Shim and Broker (Default: 38401).
 
   [Broker / Server Settings]
-  ARBITER_TICKET_THRESHOLD_WAIT   Wait time (secs) before auto-shifting to ASYNC (Default: 180).
+  ARBITER_TICKET_THRESHOLD_WAIT   Wait time (secs) before auto-shifting to ASYNC (Default: 0 = disabled).
+                                  Overrides async_ticket_threshold_seconds in arbiter.yaml when set.
   ARBITER_TICKET_THRESHOLD_DEPTH  Queue depth before auto-shifting to ASYNC (Default: 3).
   ARBITER_TICKET_CLAIM_WINDOW     Time (secs) an ASYNC ticket stays READY before expiring (Default: 45).
   ARBITER_WATCHDOG_INTERVAL       Watchdog sweep interval in milliseconds (Default: 5000).

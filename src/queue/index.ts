@@ -22,6 +22,13 @@ class QueueEngine {
   private pumping: Set<string> = new Set();
   public experimentalScheduling: boolean = true;
 
+  // Set by broker/server.ts from config.
+  // 0 (default) = blocking-only mode, no async tickets ever issued.
+  // Positive value = seconds a blocking request must wait before being auto-promoted.
+  // This replaces the old ARBITER_TICKET_THRESHOLD_WAIT env-var default of 180 s.
+  // Defaults to 180s in test mode to support unit tests of the queue engine.
+  public asyncTicketThresholdMs: number = process.env.ARBITER_TEST_MODE === 'true' ? 180000 : 0;
+
   // Diagnostics
   public lastWatchdogRun: number = 0;
   private watchdogInFlight: boolean = false;
@@ -167,6 +174,12 @@ class QueueEngine {
   public enqueue(request: LeaseRequest): Promise<string> {
       return new Promise((resolve, reject) => {
           const resourceQueue = this.queue.get(request.resource) || [];
+          // When async mode is disabled, ignore any ASYNC wait_mode from the caller
+          // and always use BLOCKING so the request simply waits in the queue.
+          const effectiveWaitMode =
+              (this.asyncTicketThresholdMs > 0 && request.wait_mode === 'ASYNC')
+                  ? 'ASYNC'
+                  : 'BLOCKING';
           const entry: QueueEntry = { 
               id: 'q_' + randomUUID().substring(0, 8), 
               request, 
@@ -174,7 +187,7 @@ class QueueEngine {
               reject, 
               waiting_since: Date.now(),
               status: 'WAITING',
-              wait_mode: request.wait_mode || 'BLOCKING'
+              wait_mode: effectiveWaitMode
           };
           
           resourceQueue.push(entry);
@@ -355,7 +368,17 @@ class QueueEngine {
       this.watchdogInFlight = true;
       try {
           this.lastWatchdogRun = Date.now();
-          const thresholdWaitMs = parseInt(process.env.ARBITER_TICKET_THRESHOLD_WAIT || '180') * 1000;
+          const asyncThresholdMs = this.asyncTicketThresholdMs;
+
+          // When async mode is disabled, just pump all queues and return.
+          // Never convert a blocking request to an async ticket.
+          if (asyncThresholdMs <= 0) {
+              for (const resource of this.queue.keys()) this.pump(resource);
+              return;
+          }
+
+          // Async mode is enabled: run the Dynamic Async Shift.
+          const thresholdWaitMs = asyncThresholdMs; // driven by config, not env default
           
           for (const resource of this.queue.keys()) {
               this.pump(resource);

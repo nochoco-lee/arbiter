@@ -32,3 +32,22 @@ resources:
       - "gradlew"
       - "pod install"
       - "npm install"
+
+    # --- PERMIT AUTO-DENY ---
+    # How long (seconds) a PENDING permit waits for the owner to resolve it before
+    # the broker automatically denies it.  Default: 30.
+    # Set to 0 to disable auto-deny (permits wait indefinitely for manual resolution).
+    # Agents blocked on a denied permit should request a full lease instead.
+    permit_auto_deny_seconds: 10
+
+# --- ASYNC TICKET MODE (disabled by default) ---
+# By default every lease request blocks until the resource is granted.
+# Enable async tickets by setting this value to the wait threshold (in seconds).
+# Requests that have waited longer than this will be converted to async reservation
+# tickets (HTTP 202), allowing the agent to continue non-device work while waiting.
+#
+# Equivalent to the ARBITER_TICKET_THRESHOLD_WAIT env var, but explicit and
+# version-controlled.  The env var default was 180 s (always on); this config
+# key defaults to 0 (disabled) when omitted.
+#
+# async_ticket_threshold_seconds: 300

@@ -14,6 +14,9 @@ export interface ResourceConfig {
     max_lease_seconds?: number;
     default_lease_seconds?: number;
     heartbeat_timeout_seconds?: number;
+    // How long (seconds) before an unresolved pending permit is auto-denied.
+    // Default: 30. Set to 0 to disable auto-deny (manual resolve only).
+    permit_auto_deny_seconds?: number;
 }
 
 export interface ArbiterConfig {
@@ -22,6 +25,10 @@ export interface ArbiterConfig {
     max_lease_seconds?: number;
     global_ceiling_seconds?: number;
     heartbeat_timeout_seconds?: number;
+    // Seconds a blocking request must wait before being auto-promoted to an async ticket.
+    // Omit or set to 0 (default) to keep blocking-only mode — no async tickets are ever issued.
+    // Equivalent to the ARBITER_TICKET_THRESHOLD_WAIT env var, but explicit and version-controlled.
+    async_ticket_threshold_seconds?: number;
     resources: Record<string, ResourceConfig>;
 }
 

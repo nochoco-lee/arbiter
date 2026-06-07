@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import * as assert from 'node:assert';
 import * as http from 'http';
-import { allocatePort, startBrokerInstance } from '../helpers/harness';
+import { allocatePort, startBrokerWithEnv } from '../helpers/harness';
 import { randomUUID } from 'crypto';
 
 process.env.ARBITER_TEST_MODE = 'true';
@@ -11,7 +11,7 @@ const CONCURRENCY = 50;
 
 test('Thundering Herd Concurrency', async (t) => {
     const port = allocatePort();
-    const broker = await startBrokerInstance(port);
+    const broker = await startBrokerWithEnv(port, {}, 'async_ticket_threshold_seconds: 180\n');
     const resource = `test-herd-${randomUUID().substring(0, 8)}`;
 
     try {
