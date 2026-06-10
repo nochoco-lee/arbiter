@@ -118,7 +118,7 @@ arbiter permit resolve <id> grant
 arbiter permit resolve <id> deny
 \`\`\`
 If permits are pending, your own subsequent device commands may block until you resolve them.
-\`;
+`;
 
     fs.writeFileSync(skillPath, content, 'utf8');
     console.log(`[ARBITER] Successfully installed 'arbiter' skill at ${skillPath}`);
