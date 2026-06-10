@@ -1,6 +1,6 @@
 {
   "name": "@nochoco-lee/arbiter",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Agentic Resource Broker & Interceptor for coordinating shared test bridges and hardware.",
   "engines": {
     "node": ">=18.0.0"
