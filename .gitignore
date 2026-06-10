@@ -33,3 +33,5 @@ test-install/
 tmp-bin/
 tmp-test-bin/
 docs/archive/
+
+gha-creds-*.json

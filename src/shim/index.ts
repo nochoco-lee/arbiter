@@ -202,12 +202,6 @@ COMMANDS:
   lease status           View status of the current lease or a specific resource.
     --resource <name>    View status of a specific resource.
 
-  permit request         Request a one-time shared access permit.
-    --resource <name>    The resource to access (e.g. android).
-    --commands <cmd>     The EXACT command to run (e.g. 'adb logcat -d'). This is shown verbatim to the lease owner.
-  
-  permit resolve <id>    Resolve a pending permit request (grant/deny).
-  
   estimate <command>     Get a wait-time estimate for a specific command based on history.
   state history          View the command audit trail for the current session.
 
@@ -616,8 +610,6 @@ async function main() {
 
             if (!isExempt) {
                 process.stderr.write(`${getTimestamp()} [ARBITER] State: your lease has pending permit requests that require owner action.\n`);
-                process.stderr.write(`${getTimestamp()} [ARBITER] Next: resolve each listed permit, then rerun your blocked command.\n`);
-                process.stderr.write(`${getTimestamp()} [ARBITER] Avoid: do not continue device-mutating work until the permits are granted or denied.\n`);
                 process.exit(1);
             }
         }
@@ -955,13 +947,10 @@ async function main() {
                   if (permit.error) {
                       if (permit.error === 'resource_not_leased') {
                           process.stderr.write(`${getTimestamp()} [ARBITER] Permit request failed: no compatible active owner lease is available.\n`);
-                          process.stderr.write(`${getTimestamp()} [ARBITER] Next: request a full lease if you need direct resource access now.\n`);
                       } else if (permit.error === 'permit_denied_late_session') {
                           process.stderr.write(`${getTimestamp()} [ARBITER] Permit request denied: the current lease is too close to expiry.\n`);
-                          process.stderr.write(`${getTimestamp()} [ARBITER] Next: wait for the next lease owner or request a full lease later.\n`);
                       } else {
                           process.stderr.write(`${getTimestamp()} [ARBITER] Permit request failed: ${permit.error}\n`);
-                          process.stderr.write(`${getTimestamp()} [ARBITER] Next: request a full lease if this task still requires the resource.\n`);
                       }
                       return;
                   }
@@ -969,13 +958,11 @@ async function main() {
                   if (permit.status === 'GRANTED') {
                       process.stdout.write(`${getTimestamp()} Auto-Granted Permit: Executing ${commands}\n`);
                       process.stdout.write(`[ARBITER] Permit Token: ${permit.permit_token}\n`);
-                      process.stdout.write(`[ARBITER] Next: this one-time command will run now without taking the full lease.\n`);
                       await executePermitCommand(commands, permit.permit_token);
                       return;
                   }
                   
                   process.stdout.write(`${getTimestamp()} Permit ${permit.id} is pending owner decision.\n`);
-                  process.stdout.write(`${getTimestamp()} Next: wait for the current lease owner to grant or deny this one-time request.\n`);
                   const poll = setInterval(async () => {
                       const pres = await shimRequest<any>(`${BROKER_URL}/api/permit/status?resource=${resource}&id=${permit.id}`, { method: 'GET' });
                       if (pres.error) {
@@ -987,13 +974,11 @@ async function main() {
                       if (pState.status === 'GRANTED') {
                           clearInterval(poll);
                           process.stdout.write(`${getTimestamp()} Owner Granted Permit! Executing ${commands}\n`);
-                          process.stdout.write(`${getTimestamp()} Next: this one-time command will run now; no full lease request is needed.\n`);
                           await executePermitCommand(commands, pState.permit_token);
                           process.exit(0);
                       } else if (pState.status === 'DENIED') {
                           clearInterval(poll);
                           process.stderr.write(`${getTimestamp()} Owner denied the one-time permit request.\n`);
-                          process.stderr.write(`${getTimestamp()} Next: request a full lease if the task still needs this resource.\n`);
                           process.exit(1);
                       }
                   }, 2000);
@@ -1002,7 +987,6 @@ async function main() {
                   setTimeout(() => {
                       clearInterval(poll);
                       process.stderr.write(`${getTimestamp()} Permit request timed out while waiting for owner action.\n`);
-                      process.stderr.write(`${getTimestamp()} Next: retry the permit request later or request a full lease if the task is blocked.\n`);
                       process.exit(1);
                   }, 120000);
                   return;
@@ -1019,7 +1003,6 @@ async function main() {
                       process.stdout.write("Permit resolution recorded successfully.\n");
                       if (out.permit_token) {
                           process.stdout.write(`[ARBITER] Permit Token: ${out.permit_token}\n`);
-                          process.stdout.write(`[ARBITER] Next: the requesting agent may now execute its one-time command with that token.\n`);
                       }
                   } else {
                       process.stdout.write("Resolution error. The permit may be invalid or you may not be authorized.\n");
@@ -1523,8 +1506,7 @@ async function main() {
             process.stderr.write(`${getTimestamp()} [ARBITER] IMPORTANT: You are currently holding an exclusive lease on this resource.\n`);
             process.stderr.write(`${getTimestamp()} [ARBITER] Next: if more related resource commands are needed, continue using this same lease.\n`);
             process.stderr.write(`${getTimestamp()} [ARBITER] Next: if the resource work is finished, release the lease now.\n`);
-            process.stderr.write(`${getTimestamp()} [ARBITER] Command: arbiter release\n`);
-            process.stderr.write(`${getTimestamp()} [ARBITER] If you only need one-time shared access in another session, use 'arbiter permit request ...' instead of taking a full lease.\n\n`);
+            process.stderr.write(`${getTimestamp()} [ARBITER] Command: arbiter release\n\n`);
         }
         process.exit(code ?? 0);
     });

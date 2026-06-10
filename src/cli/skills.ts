@@ -98,7 +98,27 @@ If you receive a ticket unexpectedly and are unsure how to proceed, you can alwa
 \`\`\`bash
 arbiter request <resource_name> --wait
 \`\`\`
-`;
+
+## Advanced: One-time Shared Access (Permits)
+
+> **Warning:** The permit system is **experimental** and not guaranteed to work reliably in all environments. It is intended for advanced multi-agent coordination scenarios.
+
+If you only need to run a single, short-lived device command while another agent holds the lease, you can request a **permit** instead of a full lease. This requires the current lease owner's approval.
+
+**Request a permit:**
+\`\`\`bash
+arbiter permit request --resource <name> --commands "<exact_command>"
+\`\`\`
+If granted, the command will execute automatically using a one-time permit token.
+
+**Resolve pending permits (as a lease owner):**
+If you are the lease owner and see permit requests from other agents, you can unblock them by resolving the requests:
+\`\`\`bash
+arbiter permit resolve <id> grant
+arbiter permit resolve <id> deny
+\`\`\`
+If permits are pending, your own subsequent device commands may block until you resolve them.
+\`;
 
     fs.writeFileSync(skillPath, content, 'utf8');
     console.log(`[ARBITER] Successfully installed 'arbiter' skill at ${skillPath}`);
